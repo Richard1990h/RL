@@ -1,0 +1,50 @@
+{
+  "name": "rally-live",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 4500",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:reset": "prisma db push --force-reset && tsx prisma/seed.ts",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@paypal/paypal-js": "^9.2.0",
+    "@paypal/react-paypal-js": "^8.9.2",
+    "@prisma/client": "^6.19.2",
+    "bcryptjs": "^3.0.3",
+    "formidable": "^3.5.4",
+    "jsonwebtoken": "^9.0.3",
+    "lucide-react": "^0.563.0",
+    "mysql2": "^3.16.2",
+    "next": "16.1.6",
+    "prisma": "^6.19.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "stripe": "^20.3.0",
+    "uuid": "^13.0.0",
+    "zustand": "^5.0.11"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/formidable": "^3.4.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/uuid": "^10.0.0",
+    "dotenv": "^17.2.3",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "tailwindcss": "^4",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}

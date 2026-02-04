@@ -1,0 +1,957 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ──────────────────────────────────────
+// USERS & AUTH
+// ──────────────────────────────────────
+
+enum UserRole {
+  OWNER
+  BUG_TESTER
+  END_USER
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  username      String   @unique
+  displayName   String   @unique
+  passwordHash  String
+  avatarUrl     String?  @db.Text
+  bio           String?  @db.Text
+  dateOfBirth   DateTime?
+  role          UserRole @default(END_USER)
+  isCreator     Boolean  @default(false)
+  verifiedBadge Boolean  @default(false)
+  followerCount  Int      @default(0)
+  followingCount Int      @default(0)
+  friendCount    Int      @default(0)
+  lastActiveAt   DateTime?
+  isPremium     Boolean  @default(false)
+  isOwner       Boolean  @default(false)
+  isBanned      Boolean  @default(false)
+  isDeactivated Boolean  @default(false)
+  preferences   Json?
+  premiumUntil  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Wallet
+  wallet        Wallet?
+
+  // Content
+  videos        Video[]
+  series        Series[]
+  liveStreams    LiveStream[]
+  services      Service[]
+
+  // Interactions
+  comments      Comment[]
+  commentLikes  CommentLike[]
+  likes         Like[]
+  sentMessages     Message[]   @relation("SentMessages")
+  receivedMessages Message[]   @relation("ReceivedMessages")
+
+  // Social
+  followers     Follow[]  @relation("Following")
+  following     Follow[]  @relation("Followers")
+  blockedUsers  Block[]   @relation("Blocker")
+  blockedBy     Block[]   @relation("Blocked")
+
+  // Notifications
+  notifications Notification[]
+
+  // Moderation
+  reports       Report[]  @relation("Reporter")
+  reportedBy    Report[]  @relation("Reported")
+  moderatorOf   Moderator[]
+
+  // Transactions
+  transactions  Transaction[]
+
+  // Live participation
+  liveParticipants LiveParticipant[]
+
+  // Service orders
+  serviceOrdersBuyer  ServiceOrder[] @relation("Buyer")
+  serviceOrdersSeller ServiceOrder[] @relation("Seller")
+
+  // Subscriptions
+  subscriptions Subscription[]
+
+  // Sessions
+  sessions      Session[]
+
+  // Credit Ledger
+  creditLedger  CreditLedger[]
+
+  // Ad settings
+  adSettings    AdSettings?
+
+  // Custom ads
+  customAds     CustomAd[]
+  adImpressionCreator AdImpressionLog[] @relation("adImpressionCreator")
+
+  // Bug reports
+  bugReports    BugReport[]
+
+  // Recordings
+  recordings    Recording[]
+
+  // Editor projects
+  editorProjects EditorProject[]
+
+  // Streaks
+  streaksAsUser1 MessageStreak[] @relation("StreakUser1")
+  streaksAsUser2 MessageStreak[] @relation("StreakUser2")
+
+  // Friends
+  sentFriendRequests     FriendRequest[] @relation("FriendRequestSender")
+  receivedFriendRequests FriendRequest[] @relation("FriendRequestReceiver")
+  friendshipsAsUser1     Friendship[]    @relation("FriendshipUser1")
+  friendshipsAsUser2     Friendship[]    @relation("FriendshipUser2")
+  friendTimeoutsAsOwner  FriendTimeout[] @relation("FriendTimeoutOwner")
+  friendTimeoutsAsTarget FriendTimeout[] @relation("FriendTimeoutTarget")
+
+  @@index([email])
+  @@index([username])
+  @@index([displayName])
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique @db.VarChar(500)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+}
+
+// ──────────────────────────────────────
+// WALLET & CREDITS
+// ──────────────────────────────────────
+
+model Wallet {
+  id           String @id @default(uuid())
+  userId       String @unique
+  credits      Int    @default(0)
+  totalEarned  Int    @default(0)
+  totalSpent   Int    @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Transaction {
+  id          String   @id @default(uuid())
+  userId      String
+  type        TransactionType
+  amountCents Int
+  credits     Int      @default(0)
+  description String   @db.Text
+  status      TransactionStatus @default(PENDING)
+  stripeId    String?
+  paypalId    String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  CREDIT_PURCHASE
+  CREDIT_SPENT
+  CREDIT_EARNED
+  DONATION
+  SUBSCRIPTION
+  AD_REVENUE
+  SERVICE_PAYMENT
+  SERVICE_PAYOUT
+  STREAK_BONUS
+  CREDIT_TRANSFER
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+// ──────────────────────────────────────
+// CREDIT LEDGER (double-entry)
+// ──────────────────────────────────────
+
+enum LedgerEntryType {
+  PAYPAL_PURCHASE
+  STRIPE_PURCHASE
+  TRANSFER_IN
+  TRANSFER_OUT
+  SPEND
+  WITHDRAW
+  ADJUSTMENT
+  REVERSAL
+  ADMIN_GRANT
+  DONATION_IN
+  DONATION_OUT
+  SERVICE_PAYMENT
+  SERVICE_EARNING
+  SERVICE_REFUND
+  MESSAGE_COST
+  PLATFORM_FEE_PENDING
+  PLATFORM_FEE_SETTLED
+  AD_PURCHASE
+  AD_REFUND
+  AD_IMPRESSION_EARNING
+  AD_CREATOR_PAYOUT
+}
+
+model CreditLedger {
+  id           String          @id @default(uuid())
+  userId       String
+  deltaCredits Int
+  type         LedgerEntryType
+  referenceId  String
+  description  String?         @db.Text
+  createdAt    DateTime        @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([type, referenceId])
+  @@index([userId])
+  @@index([referenceId])
+  @@index([type])
+  @@index([userId, type])
+  @@index([createdAt])
+}
+
+model PlatformSettings {
+  id                       String   @id @default("singleton")
+  withdrawalFeePct         Int      @default(2)
+  withdrawalFeeMinCents    Int      @default(25)
+  purchaseFeePct           Int      @default(5)
+  customAdPriceCredits     Int      @default(5000)  // submission fee
+  customAdCostPerImpression Int     @default(1)      // credits deducted per impression
+  customAdMinBalance       Int      @default(100)    // minimum credits to keep serving
+  customAdMixPercent       Int      @default(50)     // % chance a custom ad plays (0-100)
+  adPayoutDay              Int      @default(0)      // day of month for auto-payout (0 = manual only)
+  updatedAt                DateTime @updatedAt
+}
+
+// ──────────────────────────────────────
+// VIDEOS & SERIES
+// ──────────────────────────────────────
+
+model Video {
+  id              String   @id @default(uuid())
+  title           String
+  description     String   @db.Text
+  thumbnailUrl    String?  @db.Text
+  videoUrl        String?  @db.Text
+  durationSec     Int      @default(0)
+  creatorId       String
+  views           Int      @default(0)
+  impressions     Int      @default(0)
+  likes           Int      @default(0)
+  dislikes        Int      @default(0)
+  commentsCount   Int      @default(0)
+  commentsEnabled Boolean  @default(true)
+  tags            Json     @default("[]")
+  status          VideoStatus @default(PROCESSING)
+  visibility      VideoVisibility @default(PUBLIC)
+  seriesId        String?
+  seriesOrder     Int?
+  autoplayNextId  String?
+  storagePath     String?  @db.Text
+  resolutions     Json     @default("[]")
+  uploadDate      DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  creator    User        @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  series     Series?     @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+  comments   Comment[]
+  likesList  Like[]
+  videoViews VideoView[]
+  adImpressionLogs AdImpressionLog[]
+
+  @@index([creatorId])
+  @@index([seriesId])
+  @@index([uploadDate])
+  @@index([views])
+}
+
+model VideoView {
+  id        String   @id @default(uuid())
+  videoId   String
+  userId    String?
+  ipHash    String
+  viewedAt  DateTime @default(now())
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([videoId, userId])
+  @@unique([videoId, ipHash])
+  @@index([videoId])
+  @@index([viewedAt])
+}
+
+enum VideoStatus {
+  PROCESSING
+  READY
+  FAILED
+  DELETED
+}
+
+enum VideoVisibility {
+  PUBLIC
+  UNLISTED
+  PRIVATE
+  FOLLOWERS_ONLY
+}
+
+model Series {
+  id          String   @id @default(uuid())
+  title       String
+  description String   @db.Text
+  coverUrl    String?  @db.Text
+  creatorId   String
+  totalEpisodes Int    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  creator  User    @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  episodes Video[]
+
+  @@index([creatorId])
+}
+
+// ──────────────────────────────────────
+// COMMENTS & LIKES
+// ──────────────────────────────────────
+
+model Comment {
+  id        String   @id @default(uuid())
+  userId    String
+  videoId   String
+  text      String   @db.Text
+  likes     Int      @default(0)
+  parentId  String?
+  createdAt DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video        Video         @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  parent       Comment?      @relation("CommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies      Comment[]     @relation("CommentReplies")
+  commentLikes CommentLike[]
+
+  @@index([videoId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model CommentLike {
+  id        String   @id @default(uuid())
+  userId    String
+  commentId String
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, commentId])
+  @@index([commentId])
+}
+
+model Like {
+  id        String   @id @default(uuid())
+  userId    String
+  videoId   String
+  isLike    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+  @@index([videoId])
+}
+
+// ──────────────────────────────────────
+// SOCIAL (FOLLOWS, BLOCKS)
+// ──────────────────────────────────────
+
+model Follow {
+  id         String   @id @default(uuid())
+  followerId String
+  followingId String
+  createdAt  DateTime @default(now())
+
+  follower  User @relation("Followers", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+}
+
+model Block {
+  id        String   @id @default(uuid())
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockerId])
+  @@index([blockedId])
+}
+
+// ──────────────────────────────────────
+// FRIENDS
+// ──────────────────────────────────────
+
+model FriendRequest {
+  id         String              @id @default(uuid())
+  senderId   String
+  receiverId String
+  status     FriendRequestStatus @default(PENDING)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  sender   User @relation("FriendRequestSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("FriendRequestReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([status])
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
+model Friendship {
+  id        String   @id @default(uuid())
+  user1Id   String
+  user2Id   String
+  createdAt DateTime @default(now())
+
+  user1 User @relation("FriendshipUser1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2 User @relation("FriendshipUser2", fields: [user2Id], references: [id], onDelete: Cascade)
+
+  @@unique([user1Id, user2Id])
+  @@index([user1Id])
+  @@index([user2Id])
+}
+
+model FriendTimeout {
+  id        String   @id @default(uuid())
+  ownerId   String
+  targetId  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  owner  User @relation("FriendTimeoutOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  target User @relation("FriendTimeoutTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, targetId])
+  @@index([ownerId])
+  @@index([targetId])
+}
+
+// ──────────────────────────────────────
+// MESSAGING (Snapchat-style)
+// ──────────────────────────────────────
+
+model Message {
+  id           String        @id @default(uuid())
+  senderId     String
+  receiverId   String
+  text         String?       @db.Text
+  mediaUrl     String?       @db.Text
+  mediaType    MessageMediaType?
+  status       MessageStatus @default(SENT)
+  isPrivate    Boolean       @default(false)
+  deleteAfter  DeleteAfterMode @default(IMMEDIATELY)
+  viewTimerSec Int?
+  openedAt     DateTime?
+  deletedForRecipientAt DateTime?
+  creditCost   Int           @default(0)
+  createdAt    DateTime      @default(now())
+
+  sender   User @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([createdAt])
+}
+
+enum MessageMediaType {
+  IMAGE
+  VIDEO
+  AUDIO
+}
+
+enum MessageStatus {
+  SENT
+  DELIVERED
+  OPENED
+  DELETED
+}
+
+enum DeleteAfterMode {
+  IMMEDIATELY
+  AFTER_24H
+  WHEN_BOTH_LEAVE
+  NEVER
+}
+
+model MessageStreak {
+  id          String   @id @default(uuid())
+  user1Id     String
+  user2Id     String
+  streakDays  Int      @default(0)
+  lastMessage DateTime @default(now())
+  bonusesPaid Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  user1 User @relation("StreakUser1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2 User @relation("StreakUser2", fields: [user2Id], references: [id], onDelete: Cascade)
+
+  @@unique([user1Id, user2Id])
+  @@index([user1Id])
+  @@index([user2Id])
+}
+
+// ──────────────────────────────────────
+// LIVE STREAMS & BATTLES
+// ──────────────────────────────────────
+
+model LiveStream {
+  id            String   @id @default(uuid())
+  hostId        String
+  title         String
+  tags          Json     @default("[]")
+  viewerCount   Int      @default(0)
+  peakViewers   Int      @default(0)
+  isBattle      Boolean  @default(false)
+  mode          LiveMode @default(STANDARD)
+  status        LiveStatus @default(WAITING)
+  roundTimeSec  Int      @default(0)
+  minDonation   Int      @default(0)
+  bgColor       String?
+  bgImageUrl    String?  @db.Text
+  streamKey     String?  @unique
+  recordingPath String?  @db.Text
+  startedAt     DateTime?
+  endedAt       DateTime?
+  createdAt     DateTime @default(now())
+
+  host         User              @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  participants LiveParticipant[]
+  moderators   Moderator[]
+  chatMessages LiveChatMessage[]
+  recordings   Recording[]
+
+  @@index([hostId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Recording {
+  id            String          @id @default(uuid())
+  liveStreamId  String
+  userId        String
+  title         String
+  filePath      String          @db.Text
+  thumbnailUrl  String?         @db.Text
+  durationSec   Int             @default(0)
+  sizeBytes     BigInt          @default(0)
+  status        RecordingStatus @default(PROCESSING)
+  createdAt     DateTime        @default(now())
+
+  liveStream LiveStream @relation(fields: [liveStreamId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([liveStreamId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+enum RecordingStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+model EditorProject {
+  id          String   @id @default(uuid())
+  userId      String
+  mediaId     String
+  mediaType   String   @default("recording") // "recording" or "video"
+  title       String   @default("Untitled Project")
+  editState   Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([mediaId])
+  @@unique([userId, mediaId])
+}
+
+enum LiveMode {
+  STANDARD
+  TIMER_WARS
+  TOWER_WARS
+  ROOMS
+  TRIVIA
+  AUCTION
+  SPIN_WHEEL
+  LAST_STANDING
+}
+
+enum LiveStatus {
+  WAITING
+  LIVE
+  ENDED
+}
+
+model LiveParticipant {
+  id           String   @id @default(uuid())
+  liveStreamId String
+  userId       String
+  role         ParticipantRole @default(VIEWER)
+  joinedAt     DateTime @default(now())
+
+  liveStream LiveStream @relation(fields: [liveStreamId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([liveStreamId, userId])
+  @@index([liveStreamId])
+  @@index([userId])
+}
+
+enum ParticipantRole {
+  HOST
+  GUEST
+  VIEWER
+}
+
+model LiveChatMessage {
+  id           String   @id @default(uuid())
+  liveStreamId String
+  userId       String
+  text         String   @db.Text
+  isDonation   Boolean  @default(false)
+  creditAmount Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  liveStream LiveStream @relation(fields: [liveStreamId], references: [id], onDelete: Cascade)
+
+  @@index([liveStreamId])
+  @@index([createdAt])
+}
+
+model Moderator {
+  id           String   @id @default(uuid())
+  liveStreamId String
+  userId       String
+  createdAt    DateTime @default(now())
+
+  liveStream LiveStream @relation(fields: [liveStreamId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([liveStreamId, userId])
+}
+
+// ──────────────────────────────────────
+// MODERATION & REPORTS
+// ──────────────────────────────────────
+
+model Report {
+  id         String     @id @default(uuid())
+  reporterId String
+  reportedId String
+  reason     String     @db.Text
+  type       ReportType
+  contentId  String?
+  status     ReportStatus @default(PENDING)
+  createdAt  DateTime   @default(now())
+
+  reporter User @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reported User @relation("Reported", fields: [reportedId], references: [id], onDelete: Cascade)
+
+  @@index([reporterId])
+  @@index([reportedId])
+  @@index([status])
+}
+
+enum ReportType {
+  USER
+  VIDEO
+  COMMENT
+  LIVE_STREAM
+  MESSAGE
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  ACTIONED
+  DISMISSED
+}
+
+// ──────────────────────────────────────
+// SERVICES (Creator marketplace)
+// ──────────────────────────────────────
+
+model Service {
+  id            String   @id @default(uuid())
+  creatorId     String
+  title         String
+  description   String   @db.Text
+  category      ServiceCategory
+  priceCredits  Int
+  deliveryDays  Int      @default(7)
+  maxOrders     Int?
+  activeOrders  Int      @default(0)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  creator User           @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  orders  ServiceOrder[]
+
+  @@index([creatorId])
+  @@index([category])
+}
+
+enum ServiceCategory {
+  COACHING
+  VIDEO_REVIEW
+  CUSTOM_CONTENT
+  SHOUTOUT
+  COLLABORATION
+  OTHER
+}
+
+model ServiceOrder {
+  id         String      @id @default(uuid())
+  serviceId  String
+  buyerId    String
+  sellerId   String
+  status     OrderStatus @default(PENDING)
+  credits    Int
+  notes      String?     @db.Text
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  buyer   User    @relation("Buyer", fields: [buyerId], references: [id], onDelete: Cascade)
+  seller  User    @relation("Seller", fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@index([serviceId])
+  @@index([buyerId])
+  @@index([sellerId])
+}
+
+enum OrderStatus {
+  PENDING
+  ACCEPTED
+  IN_PROGRESS
+  DELIVERED
+  COMPLETED
+  CANCELLED
+  DISPUTED
+}
+
+// ──────────────────────────────────────
+// SUBSCRIPTIONS & ADS
+// ──────────────────────────────────────
+
+model Subscription {
+  id        String   @id @default(uuid())
+  userId    String
+  plan      SubscriptionPlan
+  status    SubStatus @default(ACTIVE)
+  stripeSubId String?
+  startDate DateTime @default(now())
+  endDate   DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+}
+
+enum SubscriptionPlan {
+  PREMIUM
+}
+
+enum SubStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  PAST_DUE
+}
+
+model AdSettings {
+  id              String  @id @default(uuid())
+  userId          String  @unique
+  adsPerVideo     Int     @default(1)
+  adsPerLiveHour  Int     @default(2)
+  creditsToSkip   Int     @default(200)
+  revenueSharePct Int     @default(10)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model CustomAd {
+  id              String    @id @default(uuid())
+  userId          String
+  title           String
+  videoUrl        String    @db.Text
+  durationSec     Int
+  status          String    @default("PENDING_REVIEW") // PENDING_REVIEW, APPROVED, REJECTED, PAUSED, EXPIRED
+  creditsPaid     Int
+  impressions     Int       @default(0)
+  maxImpressions  Int       @default(0) // 0 = unlimited
+  rejectionReason String?   @db.Text
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  expiresAt       DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  impressionLogs AdImpressionLog[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model AdImpressionLog {
+  id                  String   @id @default(uuid())
+  adId                String
+  videoId             String?
+  creatorId           String?
+  totalCredits        Int          // total cost per impression
+  creatorShareCredits Int          // creator's cut
+  platformShareCredits Int         // platform's cut
+  creatorSharePct     Int          // the % at time of impression
+  paidOut             Boolean  @default(false)
+  paidOutAt           DateTime?
+  createdAt           DateTime @default(now())
+
+  ad      CustomAd @relation(fields: [adId], references: [id], onDelete: Cascade)
+  video   Video?   @relation(fields: [videoId], references: [id], onDelete: SetNull)
+  creator User?    @relation("adImpressionCreator", fields: [creatorId], references: [id], onDelete: SetNull)
+
+  @@index([adId])
+  @@index([videoId])
+  @@index([creatorId])
+  @@index([paidOut])
+  @@index([createdAt])
+}
+
+// ──────────────────────────────────────
+// NOTIFICATIONS
+// ──────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  type      NotificationType
+  message   String   @db.Text
+  read      Boolean  @default(false)
+  relatedId String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([read])
+  @@index([createdAt])
+}
+
+enum NotificationType {
+  FOLLOW
+  LIKE
+  COMMENT
+  DONATION
+  MESSAGE
+  LIVE_START
+  SUBSCRIPTION
+  SERVICE_ORDER
+  SYSTEM
+  STREAK_BONUS
+  FRIEND_REQUEST
+  FRIEND_ACCEPT
+  PRIVATE_MESSAGE
+}
+
+// ──────────────────────────────────────
+// BUG REPORTS
+// ──────────────────────────────────────
+
+model BugReport {
+  id          String       @id @default(uuid())
+  userId      String
+  username    String
+  displayName String
+  title       String
+  description String       @db.Text
+  page        String?
+  status      BugStatus    @default(OPEN)
+  diagnosis   String?      @db.Text
+  upgradeRequest String?   @db.Text
+  fixPlan     String?      @db.Text
+  fixResult   String?      @db.Text
+  testResult  String?      @db.Text
+  adminNotes  String?      @db.Text
+  createdAt   DateTime     @default(now())
+  resolvedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum BugStatus {
+  OPEN
+  INVESTIGATING
+  DIAGNOSED
+  FIXING
+  FIXED
+  TESTING
+  RESOLVED
+  FAILED
+  DISMISSED
+}

@@ -1,0 +1,46 @@
+# Cloudflare Tunnel config for rallylive.ca
+# 
+# SETUP STEPS:
+# 1. Run: cd C:\cloudflared
+# 2. Run: cloudflared.exe tunnel login
+# 3. Run: cloudflared.exe tunnel create rally
+# 4. Copy the tunnel UUID from step 3 and replace TUNNEL_ID_HERE below
+# 5. Copy this file to: C:\Users\Richard\.cloudflared\rally-config.yml
+# 6. Run: cloudflared.exe tunnel route dns rally rallylive.ca
+# 7. Run: cloudflared.exe tunnel route dns rally www.rallylive.ca
+# 8. In Cloudflare Dashboard (Zone ID: 3bf3fc4742c0493b00467834f6e6feee):
+#    - Ensure SSL/TLS is set to "Full" or "Full (strict)"
+#    - The CNAME records will be auto-created by step 6-7
+#
+# Then run: cloudflared.exe tunnel --config C:\Users\Richard\.cloudflared\rally-config.yml run
+
+tunnel: TUNNEL_ID_HERE
+credentials-file: C:\Users\Richard\.cloudflared\TUNNEL_ID_HERE.json
+
+ingress:
+  # API v1 routes -> Go backend
+  - hostname: rallylive.ca
+    path: /api/v1/*
+    service: http://localhost:8080
+
+  # Uploaded files -> Go backend
+  - hostname: rallylive.ca
+    path: /uploads/*
+    service: http://localhost:8080
+
+  # WebSocket
+  - hostname: rallylive.ca
+    path: /ws
+    service: http://localhost:8080
+    originRequest:
+      noTLSVerify: true
+
+  # Frontend (Next.js on port 4500)
+  - hostname: rallylive.ca
+    service: http://localhost:4500
+
+  - hostname: www.rallylive.ca
+    service: http://localhost:4500
+
+  # Catch-all
+  - service: http_status:404
