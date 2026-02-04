@@ -69,12 +69,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-bg text-text`}>
         <Script
-          async
-          src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-9621220928003263"
-          crossOrigin="anonymous"
-          strategy="afterInteractive"
-        />
-        <Script
           src="https://imasdk.googleapis.com/js/sdkloader/ima3.js"
           strategy="afterInteractive"
         />

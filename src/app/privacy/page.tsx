@@ -210,11 +210,11 @@ export default function PrivacyPolicy() {
             </p>
 
             <h3 className="mb-2 mt-4 text-lg font-medium text-text">
-              4.1 Google AdSense
+              4.1 Google Video Ads
             </h3>
             <p>
-              We use Google AdSense (publisher ID: ca-pub-9621220928003263) to
-              display advertisements on the Platform. Google AdSense uses cookies
+              We use Google Interactive Media Ads (IMA SDK) to
+              display video advertisements on the Platform. Google uses cookies
               and similar technologies to serve ads based on your prior visits to
               Rally Live and other websites. Google&apos;s use of advertising
               cookies enables it and its partners to serve ads based on your
@@ -303,7 +303,7 @@ export default function PrivacyPolicy() {
               </li>
               <li>
                 <strong className="text-text">Advertising Cookies:</strong> Used
-                by Google AdSense and its partners to deliver relevant
+                by Google and its partners to deliver relevant
                 advertisements and measure ad performance.
               </li>
               <li>
