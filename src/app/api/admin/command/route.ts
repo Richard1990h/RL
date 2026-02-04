@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireOwnerWithDevice } from "@/lib/auth";
-import { insertLedgerEntry } from "@/lib/credit-ledger";
-import { logAudit } from "@/lib/user-storage";
 
 function parseCommand(input: string): { action: string; params: Record<string, string> } {
   const trimmed = input.trim();
@@ -189,98 +187,6 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ── give credits user:<username> amount:<number> ──
-    if (action === "give") {
-      const { params } = parseCommand(trimmed);
-      const username = params.user;
-      const amount = parseInt(params.amount || "0");
-      if (!username || !amount || amount <= 0) {
-        return NextResponse.json({
-          success: false,
-          message: 'Usage: give credits user:<username> amount:<number>',
-        });
-      }
-      const target = await findUser(username);
-      if (!target) {
-        return NextResponse.json({ success: false, message: `User "${username}" not found` });
-      }
-      if (!target.wallet) {
-        return NextResponse.json({ success: false, message: `User "${username}" has no wallet` });
-      }
-      await prisma.$transaction(async (tx) => {
-        const txRecord = await tx.transaction.create({
-          data: {
-            userId: target.id,
-            type: "CREDIT_EARNED",
-            amountCents: 0,
-            credits: amount,
-            description: `Admin granted ${amount} credits`,
-            status: "COMPLETED",
-          },
-        });
-
-        await insertLedgerEntry(tx, {
-          userId: target.id,
-          deltaCredits: amount,
-          type: "ADMIN_GRANT",
-          referenceId: txRecord.id,
-          description: `Admin granted ${amount} credits`,
-        });
-      });
-
-      try {
-        await logAudit(target.email, "credits", {
-          amount,
-          method: "admin_grant",
-          grantedBy: currentUser!.username,
-        });
-      } catch {} // Non-fatal
-
-      return NextResponse.json({
-        success: true,
-        message: `Granted ${amount} credits to @${username}. New balance: ${target.wallet.credits + amount} credits.`,
-      });
-    }
-
-    // ── reset wallet user:<username> ──
-    if (action === "reset") {
-      const { params } = parseCommand(trimmed);
-      const username = params.user;
-      if (!username) {
-        return NextResponse.json({ success: false, message: 'Usage: reset wallet user:<username>' });
-      }
-      const target = await findUser(username);
-      if (!target) {
-        return NextResponse.json({ success: false, message: `User "${username}" not found` });
-      }
-      if (target.isOwner) {
-        return NextResponse.json({ success: false, message: "Cannot reset owner wallet" });
-      }
-      if (!target.wallet) {
-        return NextResponse.json({ success: false, message: `User "${username}" has no wallet` });
-      }
-      const currentCredits = target.wallet.credits;
-      await prisma.$transaction(async (tx) => {
-        if (currentCredits > 0) {
-          await insertLedgerEntry(tx, {
-            userId: target.id,
-            deltaCredits: -currentCredits,
-            type: "ADJUSTMENT",
-            referenceId: `admin_reset_${target.id}_${Date.now()}`,
-            description: `Admin reset wallet to zero (was ${currentCredits} credits)`,
-          });
-        }
-        await tx.wallet.update({
-          where: { id: target.wallet!.id },
-          data: { totalEarned: 0, totalSpent: 0 },
-        });
-      });
-      return NextResponse.json({
-        success: true,
-        message: `Wallet for @${username} has been reset to zero.`,
-      });
-    }
-
     // ── users ──
     if (action === "users") {
       const users = await prisma.user.findMany({
@@ -361,8 +267,6 @@ export async function POST(req: NextRequest) {
           "  unverify user:<username>      - Remove verification badge",
           "  setrole user:<username> role:<OWNER|BUG_TESTER|END_USER> - Set user role",
           "  check credits user:<username> - View credit report",
-          "  give credits user:<username> amount:<number> - Grant credits",
-          "  reset wallet user:<username>  - Reset wallet to zero",
           "  stats                         - Platform statistics",
           "  users                         - List all users",
           "  alerts                        - Recent system alerts",

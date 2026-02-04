@@ -60,12 +60,6 @@ import {
   Play,
 } from "lucide-react";
 
-interface TerminalLine {
-  type: "input" | "stdout" | "stderr" | "system" | "admin-output" | "admin-data";
-  text: string;
-  timestamp: Date;
-}
-
 interface AdminStats {
   totalUsers: number;
   totalVideos: number;
@@ -183,17 +177,6 @@ interface BridgeLogEntry {
   status: string;
 }
 
-// Admin commands that should route to the /api/admin/command endpoint
-const ADMIN_COMMANDS = [
-  "ban", "unban", "verify", "unverify", "check", "give",
-  "reset", "stats", "users", "alerts", "help",
-];
-
-function isAdminCommand(cmd: string): boolean {
-  const first = cmd.trim().split(/\s+/)[0].toLowerCase();
-  return ADMIN_COMMANDS.includes(first);
-}
-
 export default function AdminPage() {
   const { currentUser, isLoggedIn, isLoading } = useAuthStore();
   const router = useRouter();
@@ -213,15 +196,6 @@ export default function AdminPage() {
   const [unreadAlertCount, setUnreadAlertCount] = useState(0);
   const [unreadFraudAlertCount, setUnreadFraudAlertCount] = useState(0);
   const [clearAllConfirm, setClearAllConfirm] = useState(false);
-
-  // Terminal state
-  const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
-  const [commandInput, setCommandInput] = useState("");
-  const [isExecuting, setIsExecuting] = useState(false);
-  const [cwd, setCwd] = useState("");
-  const [commandHistoryList, setCommandHistoryList] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Claude session state
   const [claudeMessages, setClaudeMessages] = useState<ClaudeMessage[]>([]);
@@ -462,26 +436,19 @@ export default function AdminPage() {
     });
   }, []);
 
-  type AdminTab = "overview" | "users" | "console" | "alerts" | "session" | "bugs" | "bridge" | "treasury" | "ads";
-  const validTabs: AdminTab[] = ["overview", "users", "console", "alerts", "session", "bugs", "bridge", "treasury", "ads"];
+  type AdminTab = "overview" | "users" | "alerts" | "session" | "bugs" | "bridge" | "treasury" | "ads";
+  const validTabs: AdminTab[] = ["overview", "users", "alerts", "session", "bugs", "bridge", "treasury", "ads"];
   const [activeTab, setActiveTabRaw] = useState<AdminTab>(() => {
     if (typeof window !== "undefined") {
       const saved = sessionStorage.getItem("admin-active-tab") as AdminTab | null;
       if (saved && validTabs.includes(saved)) return saved;
     }
-    return "console";
+    return "overview";
   });
   const setActiveTab = useCallback((tab: AdminTab) => {
     setActiveTabRaw(tab);
     try { sessionStorage.setItem("admin-active-tab", tab); } catch {}
   }, []);
-  const terminalRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const addLine = useCallback((type: TerminalLine["type"], text: string) => {
-    setTerminalLines((prev) => [...prev, { type, text, timestamp: new Date() }]);
-  }, []);
-
   const fetchStats = useCallback(async () => {
     try {
       const res = await fetch("/api/admin");
@@ -1063,16 +1030,6 @@ export default function AdminPage() {
     }
   }, []);
 
-  // Fetch CWD on mount
-  useEffect(() => {
-    fetch("/api/admin/terminal")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.cwd) setCwd(d.cwd);
-      })
-      .catch(() => {});
-  }, []);
-
   useEffect(() => {
     if (!isLoading && (!isLoggedIn || !currentUser?.isOwner)) {
       router.push("/home");
@@ -1329,180 +1286,6 @@ export default function AdminPage() {
     }
   }, [isLoggedIn, currentUser?.isOwner, activeTab, fetchAdPayouts]);
 
-  // Auto-scroll terminal
-  useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
-    }
-  }, [terminalLines]);
-
-  // Focus input when switching to console tab
-  useEffect(() => {
-    if (activeTab === "console") {
-      setTimeout(() => inputRef.current?.focus(), 100);
-    }
-  }, [activeTab]);
-
-  const executeCommand = async (cmd: string) => {
-    if (!cmd.trim()) return;
-    setIsExecuting(true);
-    setHistoryIndex(-1);
-    setCommandHistoryList((prev) => [...prev, cmd]);
-
-    // Show the input line
-    const promptPrefix = cwd ? `${cwd}>` : "$";
-    addLine("input", `${promptPrefix} ${cmd}`);
-
-    // Handle "clear" / "cls"
-    if (cmd.trim().toLowerCase() === "clear" || cmd.trim().toLowerCase() === "cls") {
-      setTerminalLines([]);
-      setIsExecuting(false);
-      setCommandInput("");
-      return;
-    }
-
-    // Route admin commands to the admin API
-    if (isAdminCommand(cmd)) {
-      try {
-        const res = await fetch("/api/admin/command", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ command: cmd }),
-        });
-        const data = await res.json();
-
-        addLine(
-          data.success ? "admin-output" : "stderr",
-          data.message || data.error || "No response"
-        );
-
-        if (data.data) {
-          addLine("admin-data", formatData(data.data));
-        }
-
-        // Refresh stats after modifying commands
-        const refreshActions = ["ban", "unban", "verify", "unverify", "give", "reset"];
-        if (refreshActions.some((a) => cmd.toLowerCase().startsWith(a))) {
-          fetchStats();
-          fetchUsers();
-        }
-      } catch {
-        addLine("stderr", "Network error - could not reach server");
-      }
-
-      setIsExecuting(false);
-      setCommandInput("");
-      return;
-    }
-
-    // Otherwise, run as a real shell command
-    try {
-      const res = await fetch("/api/admin/terminal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: cmd }),
-      });
-      const data = await res.json();
-
-      if (data.error) {
-        addLine("stderr", data.error);
-      } else {
-        if (data.stdout && data.stdout.trim()) {
-          addLine("stdout", data.stdout.trimEnd());
-        }
-        if (data.stderr && data.stderr.trim()) {
-          addLine("stderr", data.stderr.trimEnd());
-        }
-        if (!data.stdout?.trim() && !data.stderr?.trim() && data.exitCode === 0) {
-          // Silent success (like cd)
-        }
-        if (data.cwd) {
-          setCwd(data.cwd);
-        }
-      }
-    } catch {
-      addLine("stderr", "Network error - could not reach server");
-    }
-
-    setIsExecuting(false);
-    setCommandInput("");
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" && !isExecuting) {
-      executeCommand(commandInput);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      if (commandHistoryList.length > 0) {
-        const newIndex = historyIndex < commandHistoryList.length - 1 ? historyIndex + 1 : historyIndex;
-        setHistoryIndex(newIndex);
-        setCommandInput(commandHistoryList[commandHistoryList.length - 1 - newIndex]);
-      }
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      if (historyIndex > 0) {
-        const newIndex = historyIndex - 1;
-        setHistoryIndex(newIndex);
-        setCommandInput(commandHistoryList[commandHistoryList.length - 1 - newIndex]);
-      } else {
-        setHistoryIndex(-1);
-        setCommandInput("");
-      }
-    } else if (e.key === "c" && e.ctrlKey) {
-      if (isExecuting) {
-        addLine("system", "^C");
-        setIsExecuting(false);
-      }
-    } else if (e.key === "l" && e.ctrlKey) {
-      e.preventDefault();
-      setTerminalLines([]);
-    }
-  };
-
-  const formatData = (data: any): string => {
-    if (!data) return "";
-    if (Array.isArray(data)) {
-      return data
-        .map((item) => {
-          if (typeof item === "object") {
-            return Object.entries(item)
-              .map(([k, v]) => `  ${k}: ${v}`)
-              .join("\n");
-          }
-          return `  ${item}`;
-        })
-        .join("\n---\n");
-    }
-    if (typeof data === "object") {
-      if (data.recentTransactions) {
-        const txLines = data.recentTransactions
-          .map((t: any) => `    [${t.type}] ${t.credits} credits - ${t.description} (${t.status})`)
-          .join("\n");
-        const { recentTransactions, ...rest } = data;
-        const mainLines = Object.entries(rest)
-          .map(([k, v]) => `  ${k}: ${v}`)
-          .join("\n");
-        return `${mainLines}\n  Recent Transactions:\n${txLines}`;
-      }
-      return Object.entries(data)
-        .map(([k, v]) => `  ${k}: ${v}`)
-        .join("\n");
-    }
-    return String(data);
-  };
-
-  const getLineColor = (type: TerminalLine["type"]) => {
-    switch (type) {
-      case "input": return "text-white";
-      case "stdout": return "text-gray-300";
-      case "stderr": return "text-red-400";
-      case "system": return "text-yellow-500";
-      case "admin-output": return "text-green-400";
-      case "admin-data": return "text-cyan-400/80";
-      default: return "text-gray-300";
-    }
-  };
-
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center">
@@ -1634,7 +1417,6 @@ export default function AdminPage() {
   const openBugCount = bugReports.filter((b) => !["RESOLVED", "DISMISSED"].includes(b.status)).length;
 
   const tabs = [
-    { id: "console" as const, label: "Console", icon: Terminal },
     { id: "session" as const, label: "Claude Session", icon: Eye },
     { id: "bridge" as const, label: "Bridge", icon: Monitor },
     { id: "bugs" as const, label: "Bugs", icon: Bug, badge: openBugCount },
@@ -1644,101 +1426,6 @@ export default function AdminPage() {
     { id: "treasury" as const, label: "Treasury", icon: Vault },
     { id: "ads" as const, label: "Ads", icon: Megaphone },
   ];
-
-  const promptDisplay = cwd || "$";
-
-  // ── Terminal (fullscreen or embedded) ─────────────────────────────
-  const terminalContent = (
-    <div className={`flex flex-col bg-[#0a0a0a] ${isFullscreen ? "fixed inset-0 z-50" : "rounded-xl border border-border overflow-hidden"}`}>
-      {/* Terminal title bar */}
-      <div className="flex items-center gap-2 border-b border-[#1a1a1a] bg-[#111] px-4 py-2">
-        <div className="flex gap-1.5">
-          <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
-          <span className="h-3 w-3 rounded-full bg-[#febc2e]" />
-          <span className="h-3 w-3 rounded-full bg-[#28c840]" />
-        </div>
-        <div className="flex-1 text-center">
-          <span className="text-xs text-gray-500 font-mono">
-            Rally Live Admin Terminal — {currentUser?.username}
-          </span>
-        </div>
-        <button
-          onClick={() => setIsFullscreen(!isFullscreen)}
-          className="rounded p-1 text-gray-500 hover:bg-[#1a1a1a] hover:text-gray-300 transition-colors"
-        >
-          {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-        </button>
-      </div>
-
-      {/* Terminal Output */}
-      <div
-        ref={terminalRef}
-        className="flex-1 overflow-y-auto p-4 font-mono text-sm leading-relaxed"
-        style={{ minHeight: isFullscreen ? "calc(100vh - 90px)" : "500px", maxHeight: isFullscreen ? "calc(100vh - 90px)" : "70vh" }}
-        onClick={() => inputRef.current?.focus()}
-      >
-        {/* Welcome Message */}
-        {terminalLines.length === 0 && (
-          <div className="text-gray-600 mb-4">
-            <p className="text-green-500/80">Rally Live Admin Terminal v1.0</p>
-            <p className="text-gray-500">Logged in as <span className="text-cyan-400">{currentUser?.displayName}</span> (owner)</p>
-            <p className="text-gray-500">Working directory: <span className="text-gray-400">{cwd}</span></p>
-            <p className="text-gray-600 mt-2">
-              This is a live terminal. Shell commands execute directly on the server.
-            </p>
-            <p className="text-gray-600">
-              Admin commands: <span className="text-yellow-500/60">help, stats, users, alerts, ban, verify, give credits</span>
-            </p>
-            <p className="text-gray-600">
-              Shortcuts: <span className="text-yellow-500/60">Ctrl+L</span> clear | <span className="text-yellow-500/60">Ctrl+C</span> cancel | <span className="text-yellow-500/60">↑↓</span> history
-            </p>
-            <p className="mt-1 text-green-500/30">{"─".repeat(60)}</p>
-          </div>
-        )}
-
-        {/* Lines */}
-        {terminalLines.map((line, i) => (
-          <div key={i} className={`${getLineColor(line.type)} whitespace-pre-wrap break-all`}>
-            {line.text}
-          </div>
-        ))}
-
-        {isExecuting && (
-          <div className="flex items-center gap-1 text-yellow-500/70">
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-500" />
-            <span className="text-xs">running...</span>
-          </div>
-        )}
-      </div>
-
-      {/* Input */}
-      <div className="flex items-center border-t border-[#1a1a1a] bg-[#0e0e0e] px-4 py-2.5">
-        <span className="font-mono text-sm text-gray-500 mr-2 shrink-0 select-none">
-          {promptDisplay}&gt;
-        </span>
-        <input
-          ref={inputRef}
-          type="text"
-          value={commandInput}
-          onChange={(e) => setCommandInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder=""
-          disabled={isExecuting}
-          className="flex-1 bg-transparent font-mono text-sm text-white caret-green-400 focus:outline-none disabled:opacity-50"
-          autoFocus
-          spellCheck={false}
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
-        />
-      </div>
-    </div>
-  );
-
-  // If fullscreen, only show terminal
-  if (isFullscreen) {
-    return terminalContent;
-  }
 
   return (
     <div className="min-h-screen p-4 md:p-6 lg:p-8">
@@ -1781,9 +1468,6 @@ export default function AdminPage() {
           </button>
         ))}
       </div>
-
-      {/* Console Tab */}
-      {activeTab === "console" && terminalContent}
 
       {/* Claude Session Tab */}
       {activeTab === "session" && (
@@ -3062,17 +2746,17 @@ export default function AdminPage() {
           <Card>
             <h3 className="mb-4 text-lg font-semibold text-text">Quick Actions</h3>
             <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" size="sm" onClick={() => { setActiveTab("console"); setTimeout(() => { setCommandInput("stats"); inputRef.current?.focus(); }, 100); }}>
-                View Stats
+              <Button variant="secondary" size="sm" onClick={() => setActiveTab("users")}>
+                View Users
               </Button>
-              <Button variant="secondary" size="sm" onClick={() => { setActiveTab("console"); setTimeout(() => { setCommandInput("users"); inputRef.current?.focus(); }, 100); }}>
-                List Users
-              </Button>
-              <Button variant="secondary" size="sm" onClick={() => { setActiveTab("console"); setTimeout(() => { setCommandInput("alerts"); inputRef.current?.focus(); }, 100); }}>
+              <Button variant="secondary" size="sm" onClick={() => setActiveTab("alerts")}>
                 Check Alerts
               </Button>
-              <Button variant="secondary" size="sm" onClick={() => { setActiveTab("console"); setTimeout(() => { setCommandInput("help"); inputRef.current?.focus(); }, 100); }}>
-                Command Help
+              <Button variant="secondary" size="sm" onClick={() => setActiveTab("session")}>
+                Claude Session
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setActiveTab("bridge")}>
+                Bridge
               </Button>
             </div>
           </Card>
@@ -3197,13 +2881,13 @@ export default function AdminPage() {
                           <>
                             <button
                               className="rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-surface2 transition-colors"
-                              onClick={() => { setActiveTab("console"); const cmd = u.isBanned ? `unban user:${u.username}` : `ban user:${u.username}`; setTimeout(() => { setCommandInput(cmd); inputRef.current?.focus(); }, 100); }}
+                              onClick={async () => { const cmd = u.isBanned ? `unban user:${u.username}` : `ban user:${u.username}`; await fetch("/api/admin/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: cmd }) }); fetchStats(); fetchUsers(); }}
                             >
                               {u.isBanned ? "Unban" : "Ban"}
                             </button>
                             <button
                               className="rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-surface2 transition-colors"
-                              onClick={() => { setActiveTab("console"); const cmd = u.verifiedBadge ? `unverify user:${u.username}` : `verify user:${u.username}`; setTimeout(() => { setCommandInput(cmd); inputRef.current?.focus(); }, 100); }}
+                              onClick={async () => { const cmd = u.verifiedBadge ? `unverify user:${u.username}` : `verify user:${u.username}`; await fetch("/api/admin/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: cmd }) }); fetchStats(); fetchUsers(); }}
                             >
                               {u.verifiedBadge ? "Unverify" : "Verify"}
                             </button>
@@ -3211,7 +2895,8 @@ export default function AdminPage() {
                         )}
                         <button
                           className="rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-surface2 transition-colors"
-                          onClick={() => { setActiveTab("console"); setTimeout(() => { setCommandInput(`check credits user:${u.username}`); inputRef.current?.focus(); }, 100); }}
+                          onClick={() => loadAudit(u.email)}
+                          title="View credit details in audit"
                         >
                           Credits
                         </button>
