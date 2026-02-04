@@ -543,12 +543,7 @@ export default function WatchPage() {
 
   /* ── Autoplay handler with countdown ── */
   const navigateToVideo = useCallback((v: VideoData) => {
-    const creatorUsername = v.creator?.username;
-    if (creatorUsername) {
-      router.push(`/@${creatorUsername}/${v.id}`);
-    } else {
-      router.push(`/watch/${v.id}`);
-    }
+    router.push(`/watch/${v.id}`);
   }, [router]);
 
   const cancelAutoplay = useCallback(() => {

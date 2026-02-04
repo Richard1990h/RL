@@ -169,6 +169,18 @@ export default function VideoPlayer({
     const vid = videoRef.current;
     if (!vid) return;
 
+    // On mobile, IMA SDK uses the same video element for ads, which can
+    // change the src. Restore the content source if it was overwritten.
+    const contentSrc = effectiveUrl || videoUrl || "";
+    if (contentSrc && vid.currentSrc && !vid.currentSrc.includes(contentSrc.split("?")[0])) {
+      vid.src = contentSrc;
+      vid.load();
+      vid.currentTime = 0;
+      pendingPlayRef.current = true;
+      setIsBuffering(true);
+      return;
+    }
+
     if (vid.readyState >= 4) {
       // HAVE_ENOUGH_DATA — safe to play immediately
       vid.play().catch(() => {});
@@ -179,7 +191,7 @@ export default function VideoPlayer({
       pendingPlayRef.current = true;
       setIsBuffering(true);
     }
-  }, []);
+  }, [effectiveUrl, videoUrl]);
 
   const { requestAds, isAdPlaying, destroyAds } = useImaAds({
     videoRef,
@@ -362,6 +374,8 @@ export default function VideoPlayer({
   };
 
   const handleVideoEnded = () => {
+    // Ignore ended events during ad playback — the IMA SDK controls the video element
+    if (adPhaseRef.current === "playing") return;
     setPlaying(false);
     setProgress(100);
     // Exit fullscreen when video ends

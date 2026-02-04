@@ -70,7 +70,7 @@ function runPsFile(scriptContent) {
   try {
     return execSync(
       `powershell -ExecutionPolicy Bypass -File "${tmpFile}"`,
-      { encoding: "utf-8", timeout: 20000 }
+      { encoding: "utf-8", timeout: 60000 }
     ).trim();
   } catch (err) {
     return `ERROR: ${(err.message || "").substring(0, 200)}`;
