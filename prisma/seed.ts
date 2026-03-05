@@ -8,8 +8,6 @@ async function main() {
 
   // Clear existing data
   await prisma.$transaction([
-    prisma.creditAuditLog.deleteMany(),
-    prisma.credit.deleteMany(),
     prisma.liveChatMessage.deleteMany(),
     prisma.liveParticipant.deleteMany(),
     prisma.moderator.deleteMany(),
@@ -51,7 +49,7 @@ async function main() {
         isOwner: true,
         followerCount: 0,
         followingCount: 0,
-        wallet: { create: { balanceCents: 0, credits: 0, totalEarned: 0 } },
+        wallet: { create: { credits: 0, totalEarned: 0 } },
       },
     }),
     prisma.user.create({
@@ -66,7 +64,7 @@ async function main() {
         verifiedBadge: true,
         followerCount: 18700,
         followingCount: 245,
-        wallet: { create: { balanceCents: 89000, credits: 3200, totalEarned: 175000 } },
+        wallet: { create: { credits: 3200, totalEarned: 175000 } },
       },
     }),
     prisma.user.create({
@@ -81,7 +79,7 @@ async function main() {
         verifiedBadge: false,
         followerCount: 8900,
         followingCount: 567,
-        wallet: { create: { balanceCents: 45000, credits: 1500, totalEarned: 92000 } },
+        wallet: { create: { credits: 1500, totalEarned: 92000 } },
       },
     }),
     prisma.user.create({
@@ -96,7 +94,7 @@ async function main() {
         verifiedBadge: true,
         followerCount: 31200,
         followingCount: 189,
-        wallet: { create: { balanceCents: 220000, credits: 8000, totalEarned: 450000 } },
+        wallet: { create: { credits: 8000, totalEarned: 450000 } },
       },
     }),
     prisma.user.create({
@@ -111,7 +109,7 @@ async function main() {
         verifiedBadge: false,
         followerCount: 12300,
         followingCount: 432,
-        wallet: { create: { balanceCents: 67000, credits: 2100, totalEarned: 130000 } },
+        wallet: { create: { credits: 2100, totalEarned: 130000 } },
       },
     }),
     prisma.user.create({
@@ -126,7 +124,7 @@ async function main() {
         verifiedBadge: true,
         followerCount: 45000,
         followingCount: 156,
-        wallet: { create: { balanceCents: 340000, credits: 12000, totalEarned: 680000 } },
+        wallet: { create: { credits: 12000, totalEarned: 680000 } },
       },
     }),
     prisma.user.create({
@@ -141,7 +139,7 @@ async function main() {
         verifiedBadge: false,
         followerCount: 6700,
         followingCount: 890,
-        wallet: { create: { balanceCents: 23000, credits: 800, totalEarned: 45000 } },
+        wallet: { create: { credits: 800, totalEarned: 45000 } },
       },
     }),
     prisma.user.create({
@@ -156,7 +154,7 @@ async function main() {
         verifiedBadge: true,
         followerCount: 22100,
         followingCount: 278,
-        wallet: { create: { balanceCents: 156000, credits: 4500, totalEarned: 310000 } },
+        wallet: { create: { credits: 4500, totalEarned: 310000 } },
       },
     }),
     prisma.user.create({
@@ -171,7 +169,7 @@ async function main() {
         verifiedBadge: false,
         followerCount: 45,
         followingCount: 234,
-        wallet: { create: { balanceCents: 5000, credits: 500 } },
+        wallet: { create: { credits: 500 } },
       },
     }),
     prisma.user.create({
@@ -186,7 +184,7 @@ async function main() {
         verifiedBadge: false,
         followerCount: 12,
         followingCount: 156,
-        wallet: { create: { balanceCents: 2000, credits: 200 } },
+        wallet: { create: { credits: 200 } },
       },
     }),
   ]);
@@ -397,7 +395,7 @@ async function main() {
 
   console.log("\nSeeding complete!");
   console.log("Default login for all users: password123");
-  console.log("Main test account: rallyking@gmail.com / password123");
+  console.log("Main test account: richardhabermehl2016@gmail.com / password123");
 }
 
 main()

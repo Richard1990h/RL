@@ -42,6 +42,7 @@ function formatTimeShort(seconds: number): string {
 
 export default function VideoEditor() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const timelineContainerRef = useRef<HTMLDivElement>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const animFrameRef = useRef<number>(0);
 
@@ -159,7 +160,10 @@ export default function VideoEditor() {
           break;
         case "s":
         case "S":
-          if (!e.ctrlKey && !e.metaKey) {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            useEditorStore.getState().saveProject();
+          } else {
             e.preventDefault();
             splitAtCurrentPlayhead();
           }
@@ -195,12 +199,7 @@ export default function VideoEditor() {
             }
           }
           break;
-        case "s":
-          if (e.ctrlKey || e.metaKey) {
-            e.preventDefault();
-            useEditorStore.getState().saveProject();
-          }
-          break;
+        // Ctrl+S handled in "s"/"S" case above
         case "ArrowLeft":
           e.preventDefault();
           seekRelative(e.shiftKey ? -5 : e.ctrlKey ? -0.033 : -1);
@@ -506,8 +505,8 @@ export default function VideoEditor() {
               </button>
               <button
                 onClick={() => {
-                  // Zoom to fit
-                  const containerWidth = 800; // approximate
+                  // Zoom to fit — measure actual timeline container width, fallback to 800
+                  const containerWidth = timelineContainerRef.current?.getBoundingClientRect().width ?? 800;
                   const newZoom = Math.max(2, Math.floor(containerWidth / editState.duration));
                   setZoom(newZoom);
                 }}
@@ -527,7 +526,7 @@ export default function VideoEditor() {
       </div>
 
       {/* Bottom: Timeline */}
-      <div className="shrink-0 border-t border-border">
+      <div ref={timelineContainerRef} className="shrink-0 border-t border-border">
         <Timeline
           editState={editState}
           onSeek={handleSeek}

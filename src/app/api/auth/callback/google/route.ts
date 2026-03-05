@@ -97,7 +97,7 @@ export async function GET(req: NextRequest) {
             displayName,
             passwordHash,
             avatarUrl: googleUser.picture || null,
-            dateOfBirth: new Date("2000-01-01"), // Default, user can update in settings
+            dateOfBirth: null, // Must be set by user in settings
           },
         });
 

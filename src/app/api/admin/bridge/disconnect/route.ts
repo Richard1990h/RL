@@ -12,8 +12,8 @@ export async function POST() {
   const result = await bridgeFetch("/api/disconnect", { method: "POST" });
   if (!result.ok) {
     return NextResponse.json(
-      { error: "Bridge unavailable" },
-      { status: 502 }
+      result.data || { error: "Bridge unavailable" },
+      { status: result.status }
     );
   }
   return NextResponse.json(result.data);

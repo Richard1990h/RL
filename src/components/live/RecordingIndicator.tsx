@@ -1,6 +1,6 @@
 "use client";
 
-import { Circle, Pause, Play, Square } from "lucide-react";
+import { Pause, Play, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface RecordingIndicatorProps {

@@ -105,7 +105,6 @@ export const useFriendsStore = create<FriendsState>()((set, get) => ({
   startHeartbeat: () => {
     const existing = get().heartbeatInterval;
     if (existing) return;
-    // Send immediately, then every 90 seconds
     api.friends.heartbeat().catch(() => {});
     const interval = setInterval(() => {
       api.friends.heartbeat().catch(() => {});

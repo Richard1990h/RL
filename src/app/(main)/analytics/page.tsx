@@ -3,15 +3,12 @@
 import { useState, useEffect } from "react";
 import {
   Eye,
-  Clock,
   Users,
   DollarSign,
   Gift,
   Radio,
   TrendingUp,
   Megaphone,
-  MousePointerClick,
-  Target,
   BarChart3,
   Loader2,
 } from "lucide-react";
@@ -79,8 +76,6 @@ export default function AnalyticsPage() {
       </div>
     );
   }
-
-  const totalEarnedDollars = data.totalEarnedCents / 100;
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6 space-y-8">

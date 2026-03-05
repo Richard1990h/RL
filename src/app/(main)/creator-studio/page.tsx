@@ -34,6 +34,11 @@ import {
   Copy,
   Check,
   ChevronDown,
+  Monitor,
+  Plug,
+  Unplug,
+  Key,
+  Wifi,
 } from "lucide-react";
 import Tabs from "@/components/ui/Tabs";
 import Card from "@/components/ui/Card";
@@ -53,6 +58,7 @@ const tabs = [
   { id: "live", label: "Live Settings" },
   { id: "moderation", label: "Moderation" },
   { id: "ads", label: "Ad Settings" },
+  { id: "integrations", label: "Integrations" },
 ];
 
 export default function CreatorStudioPage() {
@@ -71,6 +77,7 @@ export default function CreatorStudioPage() {
         {activeTab === "live" && <LiveSettingsTab />}
         {activeTab === "moderation" && <ModerationTab />}
         {activeTab === "ads" && <AdSettingsTab />}
+        {activeTab === "integrations" && <IntegrationsTab />}
       </div>
     </div>
   );
@@ -186,6 +193,41 @@ function VisibilityDropdown({
   );
 }
 
+function RecordingProgressPopup({ recordings }: { recordings: any[] }) {
+  const processing = recordings.filter((r: any) => r.status === "PROCESSING");
+  if (processing.length === 0) return null;
+
+  return (
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+      {processing.map((rec: any) => {
+        const progress = rec.progress || 0;
+        const label = progress < 60 ? "Uploading..." : progress < 90 ? "Processing..." : "Finalizing...";
+        return (
+          <div
+            key={rec.id}
+            className="bg-bg-surface border border-border rounded-xl shadow-xl p-4 space-y-2 animate-in slide-in-from-bottom-4"
+          >
+            <div className="flex items-center gap-2">
+              <Loader2 size={16} className="animate-spin text-primary shrink-0" />
+              <span className="text-sm font-medium text-text truncate">{rec.title}</span>
+            </div>
+            <div className="w-full bg-bg-surface3 rounded-full h-2 overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-primary to-accent rounded-full transition-all duration-500 ease-out"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-text-muted">{label}</span>
+              <span className="text-xs font-medium text-primary">{progress}%</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ContentTab({ userId }: { userId: string }) {
   const [myVideos, setMyVideos] = useState<any[]>([]);
   const [myRecordings, setMyRecordings] = useState<any[]>([]);
@@ -249,6 +291,38 @@ function ContentTab({ userId }: { userId: string }) {
     return () => { cancelled = true; };
   }, [userId]);
 
+  // Poll processing recordings every 3 seconds to update progress
+  useEffect(() => {
+    const hasProcessing = myRecordings.some((r: any) => r.status === "PROCESSING");
+    if (!hasProcessing) return;
+
+    const pollProgress = async () => {
+      const processingIds = myRecordings
+        .filter((r: any) => r.status === "PROCESSING")
+        .map((r: any) => r.id);
+
+      for (const id of processingIds) {
+        try {
+          const res = await fetch(`/api/recordings/${id}`, { credentials: "include" });
+          if (res.ok) {
+            const data = await res.json();
+            const updated = data.recording;
+            setMyRecordings((prev) =>
+              prev.map((r) =>
+                r.id === id
+                  ? { ...r, status: updated.status, progress: updated.progress, durationSec: updated.durationSec || r.durationSec }
+                  : r
+              )
+            );
+          }
+        } catch {}
+      }
+    };
+
+    const interval = setInterval(pollProgress, 3000);
+    return () => clearInterval(interval);
+  }, [myRecordings]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
@@ -259,8 +333,9 @@ function ContentTab({ userId }: { userId: string }) {
 
   return (
     <div className="space-y-4">
+      <RecordingProgressPopup recordings={myRecordings} />
       <div className="flex justify-end">
-        <Link href="/upload">
+        <Link href="/upload-stream">
           <Button variant="gradient" icon={<Plus size={18} />}>
             Upload New
           </Button>
@@ -424,10 +499,19 @@ function ContentTab({ userId }: { userId: string }) {
                       </Badge>
                     )}
                     {!isReady && !isFailed && (
-                      <Badge variant="default">
-                        <Loader2 size={12} className="mr-1 animate-spin" />
-                        Processing
-                      </Badge>
+                      <div className="flex flex-col gap-1">
+                        <Badge variant="default">
+                          <Loader2 size={12} className="mr-1 animate-spin" />
+                          Processing
+                        </Badge>
+                        <div className="w-20 bg-bg-surface3 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            className="h-full bg-primary rounded-full transition-all duration-500"
+                            style={{ width: `${rec.progress || 0}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] text-text-muted">{rec.progress || 0}%</span>
+                      </div>
                     )}
                   </td>
                   <td className="py-3 px-3 hidden md:table-cell text-text-secondary">
@@ -543,7 +627,7 @@ function SeriesTab({ userId }: { userId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <Link href="/upload">
+        <Link href="/upload-stream">
           <Button variant="gradient" icon={<Plus size={18} />}>
             Create New Series
           </Button>
@@ -818,7 +902,7 @@ function LiveSettingsTab() {
         size="lg"
         fullWidth
         icon={<Radio size={20} />}
-        onClick={() => router.push(`/go-live?title=${encodeURIComponent(streamTitle)}&mode=${mode}&guestLimit=${guestLimit}&roundLength=${roundLength}&teamSize=${teamSize}&tags=${encodeURIComponent(tags.join(","))}`)}
+        onClick={() => router.push(`/upload-stream?tab=go-live&title=${encodeURIComponent(streamTitle)}&mode=${mode}&guestLimit=${guestLimit}&roundLength=${roundLength}&teamSize=${teamSize}&tags=${encodeURIComponent(tags.join(","))}`)}
       >
         Go Live
       </Button>
@@ -1338,6 +1422,335 @@ function AdSettingsTab() {
           </Button>
         </>
       )}
+    </div>
+  );
+}
+
+/* ───────── Integrations Tab ───────── */
+function IntegrationsTab() {
+  const [streamlabsToken, setStreamlabsToken] = useState("");
+  const [streamlabsMasked, setStreamlabsMasked] = useState<string | null>(null);
+  const [streamlabsConnected, setStreamlabsConnected] = useState(false);
+
+  const [obsHost, setObsHost] = useState("localhost");
+  const [obsPort, setObsPort] = useState("4455");
+  const [obsPassword, setObsPassword] = useState("");
+  const [obsPasswordMasked, setObsPasswordMasked] = useState<string | null>(null);
+  const [obsConnected, setObsConnected] = useState(false);
+
+  // RTMP Stream Key (for OBS / Streamlabs to stream to Rally Live)
+  const [rtmpStreamKey, setRtmpStreamKey] = useState("");
+  const [rtmpUrl, setRtmpUrl] = useState("");
+  const [keyVisible, setKeyVisible] = useState(false);
+  const [keyCopied, setKeyCopied] = useState(false);
+  const [urlCopied, setUrlCopied] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+
+  // Load on mount
+  useEffect(() => {
+    api.creator.getIntegrations()
+      .then((res: any) => {
+        const i = res.integrations || {};
+        setStreamlabsConnected(Boolean(i.streamlabsConnected));
+        setStreamlabsMasked(i.streamlabsTokenMasked || null);
+        setObsHost(i.obsHost || "localhost");
+        setObsPort(String(i.obsPort || 4455));
+        setObsConnected(Boolean(i.obsConnected));
+        setObsPasswordMasked(i.obsPasswordMasked || null);
+      })
+      .catch(() => {});
+
+    // Load RTMP stream key
+    api.creator.getStreamKey()
+      .then((res: any) => {
+        if (res.streamKey) setRtmpStreamKey(res.streamKey);
+        if (res.rtmpUrl) setRtmpUrl(res.rtmpUrl);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleRegenerateKey = async () => {
+    setRegenerating(true);
+    try {
+      const res: any = await api.creator.regenerateStreamKey();
+      if (res.streamKey) setRtmpStreamKey(res.streamKey);
+      setKeyVisible(true);
+    } catch {} finally { setRegenerating(false); }
+  };
+
+  const copyToClipboard = (text: string, setter: (v: boolean) => void) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setter(true);
+      setTimeout(() => setter(false), 2000);
+    }).catch(() => {});
+  };
+
+  const saveIntegrations = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      const payload: Record<string, unknown> = {
+        obsHost,
+        obsPort: Number(obsPort) || 4455,
+      };
+      // Only send token/password if user typed a new one
+      if (streamlabsToken) payload.streamlabsToken = streamlabsToken;
+      if (obsPassword) payload.obsPassword = obsPassword;
+
+      const res: any = await api.creator.updateIntegrations(payload);
+      const i = res.integrations || {};
+      setStreamlabsConnected(Boolean(i.streamlabsConnected));
+      setStreamlabsMasked(i.streamlabsTokenMasked || null);
+      setObsConnected(Boolean(i.obsConnected));
+      setObsPasswordMasked(i.obsPasswordMasked || null);
+      setStreamlabsToken("");
+      setObsPassword("");
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      setError("Failed to save integrations");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const disconnectStreamlabs = async () => {
+    setSaving(true);
+    try {
+      const res: any = await api.creator.updateIntegrations({ streamlabsToken: "" });
+      const i = res.integrations || {};
+      setStreamlabsConnected(false);
+      setStreamlabsMasked(null);
+      setStreamlabsToken("");
+    } catch {} finally { setSaving(false); }
+  };
+
+  const disconnectObs = async () => {
+    setSaving(true);
+    try {
+      const res: any = await api.creator.updateIntegrations({ obsPassword: "" });
+      const i = res.integrations || {};
+      setObsConnected(false);
+      setObsPasswordMasked(null);
+      setObsPassword("");
+    } catch {} finally { setSaving(false); }
+  };
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      {/* RTMP Stream Key — for streaming to Rally Live from OBS / Streamlabs */}
+      <Card padding="lg">
+        <div className="flex items-center gap-2 mb-1">
+          <Radio size={20} className="text-danger" />
+          <h3 className="text-lg font-semibold text-text">Stream to Rally Live</h3>
+        </div>
+        <p className="text-xs text-text-muted mb-4">
+          Use these settings in OBS Studio or Streamlabs to stream directly to Rally Live. Your stream will appear on the platform just like a browser-based stream.
+        </p>
+
+        <div className="space-y-3">
+          {/* Server URL */}
+          <div>
+            <label className="text-xs font-medium text-text-secondary mb-1 block">Server URL</label>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 flex items-center gap-2 p-2.5 bg-bg-surface2 rounded-lg border border-border font-mono text-sm text-text">
+                {rtmpUrl || "rtmp://rallylive.ca/live"}
+              </div>
+              <button
+                onClick={() => copyToClipboard(rtmpUrl || "rtmp://rallylive.ca/live", setUrlCopied)}
+                className="p-2.5 bg-bg-surface2 rounded-lg border border-border hover:border-primary transition-colors"
+                title="Copy URL"
+              >
+                {urlCopied ? <Check size={16} className="text-success" /> : <Copy size={16} className="text-text-muted" />}
+              </button>
+            </div>
+          </div>
+
+          {/* Stream Key */}
+          <div>
+            <label className="text-xs font-medium text-text-secondary mb-1 block">Stream Key</label>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 flex items-center gap-2 p-2.5 bg-bg-surface2 rounded-lg border border-border font-mono text-sm text-text overflow-hidden">
+                {rtmpStreamKey ? (
+                  keyVisible ? rtmpStreamKey : "•".repeat(Math.min(rtmpStreamKey.length, 40))
+                ) : (
+                  <span className="text-text-muted">Loading...</span>
+                )}
+              </div>
+              <button
+                onClick={() => setKeyVisible(!keyVisible)}
+                className="p-2.5 bg-bg-surface2 rounded-lg border border-border hover:border-primary transition-colors"
+                title={keyVisible ? "Hide key" : "Show key"}
+              >
+                {keyVisible ? <EyeOff size={16} className="text-text-muted" /> : <Eye size={16} className="text-text-muted" />}
+              </button>
+              <button
+                onClick={() => copyToClipboard(rtmpStreamKey, setKeyCopied)}
+                className="p-2.5 bg-bg-surface2 rounded-lg border border-border hover:border-primary transition-colors"
+                title="Copy key"
+              >
+                {keyCopied ? <Check size={16} className="text-success" /> : <Copy size={16} className="text-text-muted" />}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between pt-2">
+            <p className="text-[11px] text-text-muted">
+              Never share your stream key. Anyone with it can stream to your channel.
+            </p>
+            <button
+              onClick={handleRegenerateKey}
+              disabled={regenerating}
+              className="text-xs text-danger hover:text-danger/80 font-medium"
+            >
+              {regenerating ? "Regenerating..." : "Reset Key"}
+            </button>
+          </div>
+        </div>
+
+        {/* OBS Setup Instructions */}
+        <div className="mt-4 p-3 bg-bg-surface2/50 rounded-lg border border-border/50">
+          <p className="text-xs font-medium text-text-secondary mb-2">Quick Setup:</p>
+          <ol className="text-[11px] text-text-muted space-y-1 list-decimal list-inside">
+            <li>Open OBS Studio or Streamlabs → Settings → Stream</li>
+            <li>Set Service to <span className="text-text font-medium">Custom</span></li>
+            <li>Paste the <span className="text-text font-medium">Server URL</span> above</li>
+            <li>Paste your <span className="text-text font-medium">Stream Key</span></li>
+            <li>Click &quot;Start Streaming&quot; — you&apos;re live on Rally Live!</li>
+          </ol>
+        </div>
+      </Card>
+
+      {/* Streamlabs */}
+      <Card padding="lg">
+        <div className="flex items-center gap-2 mb-1">
+          <Wifi size={20} className="text-[#80f5d2]" />
+          <h3 className="text-lg font-semibold text-text">Streamlabs</h3>
+          {streamlabsConnected && (
+            <span className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-success bg-success/10 px-2 py-0.5 rounded-full border border-success/20">
+              <Plug size={12} /> Connected
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-text-muted mb-4">
+          Connect your Streamlabs Socket API Token to trigger alerts, read donations, and overlay events on your Rally Live stream.
+        </p>
+
+        {streamlabsConnected && streamlabsMasked ? (
+          <div className="space-y-3">
+            <div className="flex items-center gap-3 p-3 bg-bg-surface2 rounded-lg">
+              <Key size={16} className="text-text-muted shrink-0" />
+              <span className="text-sm text-text font-mono flex-1">{streamlabsMasked}</span>
+              <button
+                onClick={disconnectStreamlabs}
+                disabled={saving}
+                className="text-xs text-danger hover:text-danger/80 font-medium flex items-center gap-1"
+              >
+                <Unplug size={12} /> Disconnect
+              </button>
+            </div>
+            <p className="text-xs text-text-muted">To update, enter a new token below and save.</p>
+          </div>
+        ) : null}
+
+        <div className="mt-3">
+          <Input
+            label="Socket API Token"
+            placeholder="eyJhbGciOiJIUz..."
+            type="password"
+            value={streamlabsToken}
+            onChange={(e) => setStreamlabsToken(e.target.value)}
+          />
+          <p className="text-[11px] text-text-muted mt-1">
+            Find this at streamlabs.com → Settings → API Settings → Socket API Token
+          </p>
+        </div>
+      </Card>
+
+      {/* OBS WebSocket */}
+      <Card padding="lg">
+        <div className="flex items-center gap-2 mb-1">
+          <Monitor size={20} className="text-[#4c4c4c]" />
+          <h3 className="text-lg font-semibold text-text">OBS WebSocket</h3>
+          {obsConnected && (
+            <span className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-success bg-success/10 px-2 py-0.5 rounded-full border border-success/20">
+              <Plug size={12} /> Connected
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-text-muted mb-4">
+          Connect to OBS Studio via WebSocket to control scenes, sources, and streaming remotely from Rally Live.
+        </p>
+
+        {obsConnected && obsPasswordMasked ? (
+          <div className="space-y-3 mb-4">
+            <div className="flex items-center gap-3 p-3 bg-bg-surface2 rounded-lg">
+              <Key size={16} className="text-text-muted shrink-0" />
+              <span className="text-sm text-text font-mono flex-1">{obsPasswordMasked}</span>
+              <button
+                onClick={disconnectObs}
+                disabled={saving}
+                className="text-xs text-danger hover:text-danger/80 font-medium flex items-center gap-1"
+              >
+                <Unplug size={12} /> Disconnect
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="space-y-3">
+          <div className="grid grid-cols-3 gap-3">
+            <div className="col-span-2">
+              <Input
+                label="Host"
+                placeholder="localhost"
+                value={obsHost}
+                onChange={(e) => setObsHost(e.target.value)}
+              />
+            </div>
+            <div>
+              <Input
+                label="Port"
+                placeholder="4455"
+                value={obsPort}
+                onChange={(e) => setObsPort(e.target.value.replace(/\D/g, "").slice(0, 5))}
+              />
+            </div>
+          </div>
+          <Input
+            label="Password"
+            placeholder="Enter OBS WebSocket password"
+            type="password"
+            value={obsPassword}
+            onChange={(e) => setObsPassword(e.target.value)}
+          />
+          <p className="text-[11px] text-text-muted">
+            OBS → Tools → WebSocket Server Settings → Show Connect Info
+          </p>
+        </div>
+      </Card>
+
+      {error && (
+        <div className="flex items-center gap-2 text-sm text-danger">
+          <AlertCircle size={16} />
+          {error}
+        </div>
+      )}
+
+      <Button
+        variant="primary"
+        size="lg"
+        fullWidth
+        disabled={saving}
+        icon={saving ? <Loader2 size={18} className="animate-spin" /> : <Plug size={18} />}
+        onClick={saveIntegrations}
+      >
+        {saved ? "Integrations Saved!" : saving ? "Saving..." : "Save Integrations"}
+      </Button>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
 import { requireOwnerWithDevice } from "@/lib/auth";
+import { bridgeFetch } from "@/lib/bridge-proxy";
 import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
@@ -11,7 +11,7 @@ const CLAUDE_PROJECTS_BASE = path.join(
   "projects"
 );
 
-const DEFAULT_PROJECT_DIR = path.join(CLAUDE_PROJECTS_BASE, "C--Users-Richard-Desktop-Rally-Live");
+const DEFAULT_PROJECT_DIR = path.join(CLAUDE_PROJECTS_BASE, "C--Users-Richard-Desktop-RallyLive-ca");
 
 interface QuestionOption {
   label: string;
@@ -42,7 +42,7 @@ function resolveClaudeDir(projectDir: string): string | null {
   if (!projectDir) return null;
   try {
     const normalized = projectDir.replace(/\//g, "\\").replace(/\\+$/, "");
-    const converted = normalized.replace(/[:\\\/]/g, "-").replace(/\s+/g, "-");
+    const converted = normalized.replace(/[:\\\/.]/g, "-").replace(/\s+/g, "-");
     const candidatePath = path.join(CLAUDE_PROJECTS_BASE, converted);
     if (fs.existsSync(candidatePath)) return candidatePath;
 
@@ -69,6 +69,10 @@ function getQueueFile(claudeDir: string): string {
   return path.join(claudeDir, "message-queue.json");
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "";
+}
+
 function findLatestSession(claudeDir: string): string | null {
   try {
     if (!fs.existsSync(claudeDir)) return null;
@@ -92,12 +96,44 @@ function findLatestSession(claudeDir: string): string | null {
   }
 }
 
+function findLatestSessionGlobal(): { sessionFile: string; claudeDir: string } | null {
+  try {
+    if (!fs.existsSync(CLAUDE_PROJECTS_BASE)) return null;
+    const projectDirs = fs.readdirSync(CLAUDE_PROJECTS_BASE)
+      .map((name) => path.join(CLAUDE_PROJECTS_BASE, name))
+      .filter((full) => {
+        try {
+          return fs.statSync(full).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+
+    let latest: { sessionFile: string; claudeDir: string; mtime: number } | null = null;
+
+    for (const dir of projectDirs) {
+      const sessionFile = findLatestSession(dir);
+      if (!sessionFile) continue;
+      const mtime = fs.statSync(sessionFile).mtimeMs;
+      if (!latest || mtime > latest.mtime) {
+        latest = { sessionFile, claudeDir: dir, mtime };
+      }
+    }
+
+    return latest ? { sessionFile: latest.sessionFile, claudeDir: latest.claudeDir } : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseJSONLFile(filePath: string, afterLine?: number): { messages: ParsedMessage[]; totalLines: number } {
   const content = fs.readFileSync(filePath, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim());
   const totalLines = lines.length;
 
-  const startLine = afterLine ? Math.max(0, afterLine) : Math.max(0, lines.length - 100);
+  // When no cursor is provided, return the full active session so the admin panel
+  // mirrors Claude's own transcript instead of a short tail slice.
+  const startLine = afterLine ? Math.max(0, afterLine) : 0;
   const messages: ParsedMessage[] = [];
 
   for (let i = startLine; i < lines.length; i++) {
@@ -127,7 +163,7 @@ function parseJSONLFile(filePath: string, afterLine?: number): { messages: Parse
           if (block.type === "text" && block.text && block.text !== "(no content)") {
             textParts.push(block.text);
           } else if (block.type === "thinking" && block.thinking) {
-            parsed.thinking = block.thinking.substring(0, 500) + (block.thinking.length > 500 ? "..." : "");
+            parsed.thinking = block.thinking;
           } else if (block.type === "tool_use") {
             toolParts.push({ name: block.name || "unknown", status: "called", input: block.input });
             // Extract AskUserQuestion data
@@ -176,23 +212,51 @@ function parseJSONLFile(filePath: string, afterLine?: number): { messages: Parse
   return { messages, totalLines };
 }
 
+async function resolveBridgeProjectDir(): Promise<string> {
+  try {
+    const bridge = await bridgeFetch("/api/log");
+    if (!bridge.ok || !bridge.data) return "";
+    const selected = (bridge.data as { selectedProjectDir?: string }).selectedProjectDir;
+    if (typeof selected === "string" && selected.trim()) return selected;
+
+    // CMD and some terminal hosts may not expose projectDir directly.
+    // Fallback: parse a Windows path from the selected title.
+    const selectedTitle = (bridge.data as { selectedTitle?: string }).selectedTitle || "";
+    const titleMatch = selectedTitle.match(/[A-Za-z]:\\[^<>:"|?*\r\n]+/);
+    return titleMatch ? titleMatch[0].trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 export async function GET(req: NextRequest) {
   try {
     await requireOwnerWithDevice();
 
     const afterLine = parseInt(req.nextUrl.searchParams.get("after") || "0") || 0;
-    const projectDir = req.nextUrl.searchParams.get("projectDir") || "";
+    const exact = req.nextUrl.searchParams.get("exact") === "1";
+    const explicitProjectDir = req.nextUrl.searchParams.get("projectDir") || "";
+    const bridgeProjectDir = explicitProjectDir ? "" : await resolveBridgeProjectDir();
+    const projectDir = explicitProjectDir || bridgeProjectDir;
 
     // Resolve the Claude project directory
     const claudeDir = (projectDir ? resolveClaudeDir(projectDir) : null) || DEFAULT_PROJECT_DIR;
 
-    const sessionFile = findLatestSession(claudeDir);
+    let sessionFile = findLatestSession(claudeDir);
+    let effectiveClaudeDir = claudeDir;
+    if (!sessionFile) {
+      const latestGlobal = findLatestSessionGlobal();
+      if (latestGlobal) {
+        sessionFile = latestGlobal.sessionFile;
+        effectiveClaudeDir = latestGlobal.claudeDir;
+      }
+    }
     if (!sessionFile) {
       return NextResponse.json({
         messages: [],
         totalLines: 0,
         sessionFile: null,
-        claudeDir: path.basename(claudeDir),
+        claudeDir: path.basename(effectiveClaudeDir),
         error: "No active Claude session found"
       });
     }
@@ -200,7 +264,7 @@ export async function GET(req: NextRequest) {
     const { messages, totalLines } = parseJSONLFile(sessionFile, afterLine || undefined);
 
     // Load admin notes for THIS specific project
-    const notesFile = getNotesFile(claudeDir);
+    const notesFile = getNotesFile(effectiveClaudeDir);
     let adminNotes: { text: string; from: string; timestamp: string; viaBridge?: boolean }[] = [];
     try {
       if (fs.existsSync(notesFile)) {
@@ -218,7 +282,31 @@ export async function GET(req: NextRequest) {
       ...(note.viaBridge ? { viaBridge: true } : {}),
     }));
 
-    const allMessages = [...messages, ...noteMessages].sort((a, b) => {
+    // Load codex/external tool responses
+    const codexResponsesFile = path.join(effectiveClaudeDir, "codex-responses.json");
+    let codexMessages: ParsedMessage[] = [];
+    try {
+      if (fs.existsSync(codexResponsesFile)) {
+        const codexData = JSON.parse(fs.readFileSync(codexResponsesFile, "utf-8")) as {
+          id: string; role: string; content: string; timestamp: string; source?: string; label?: string;
+        }[];
+        codexMessages = codexData.map((msg) => ({
+          id: msg.id,
+          role: "assistant" as const,
+          content: msg.content,
+          timestamp: msg.timestamp,
+          adminFrom: msg.label || msg.source || "Codex",
+          viaBridge: true,
+        }));
+      }
+    } catch {}
+
+    // Always include codex responses and bridge-sent admin notes
+    const bridgeNotes = noteMessages.filter((n) => n.viaBridge);
+    const allMessages = (exact
+      ? [...messages, ...bridgeNotes, ...codexMessages]
+      : [...messages, ...noteMessages, ...codexMessages]
+    ).sort((a, b) => {
       const tA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
       const tB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
       return tA - tB;
@@ -228,14 +316,15 @@ export async function GET(req: NextRequest) {
       messages: allMessages,
       totalLines,
       sessionFile: path.basename(sessionFile),
-      claudeDir: path.basename(claudeDir),
+      claudeDir: path.basename(effectiveClaudeDir),
       timestamp: new Date().toISOString(),
     });
-  } catch (error: any) {
-    if (error?.message === "Unauthorized") {
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    if (message === "Unauthorized") {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
-    if (error?.message === "Forbidden" || error?.message === "Device not allowed") {
+    if (message === "Forbidden" || message === "Device not allowed") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     console.error("Claude session error:", error);
@@ -297,11 +386,12 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ ok: true });
-  } catch (error: any) {
-    if (error?.message === "Unauthorized") {
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    if (message === "Unauthorized") {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
-    if (error?.message === "Forbidden" || error?.message === "Device not allowed") {
+    if (message === "Forbidden" || message === "Device not allowed") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
@@ -323,11 +413,12 @@ export async function DELETE(req: NextRequest) {
     }
 
     return NextResponse.json({ ok: true });
-  } catch (error: any) {
-    if (error?.message === "Unauthorized") {
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    if (message === "Unauthorized") {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
-    if (error?.message === "Forbidden" || error?.message === "Device not allowed") {
+    if (message === "Forbidden" || message === "Device not allowed") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

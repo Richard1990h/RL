@@ -67,6 +67,7 @@ export interface LiveRoom {
   mode: "standard" | "timer_wars" | "tower_wars" | "rooms" | "trivia" | "auction" | "spin_wheel" | "last_standing";
   startTime: string;
   roundTimeSec: number;
+  hostCutPercent: number;
 }
 
 export interface DonationTier {
@@ -75,7 +76,7 @@ export interface DonationTier {
   valueCents: number;
   iconKey: string;
   rarityColor: string;
-  animationType: "none" | "sparkle" | "explosion";
+  animationType: "none" | "sparkle" | "explosion" | "takeover";
   category: string;
 }
 
@@ -90,17 +91,6 @@ export interface TowerUnit {
   speed: number;
   iconKey: string;
   spawnAnimation: string;
-}
-
-export interface CreditIcon {
-  id: string;
-  name: string;
-  valueCents: number;
-  iconKey: string;
-  style: "flat" | "3d" | "pixel";
-  category: string;
-  rarityColor: string;
-  promptText: string;
 }
 
 export interface Notification {

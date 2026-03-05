@@ -14,9 +14,6 @@ import {
   Sparkles,
   Smile,
   Flag,
-  RotateCw,
-  Snowflake,
-  Palette,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { EditorTool } from "@/stores/editor-store";

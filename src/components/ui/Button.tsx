@@ -14,18 +14,18 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<ButtonVariant, string> = {
-  primary: "bg-primary hover:bg-primary-dark text-white",
-  secondary: "bg-bg-surface2 hover:bg-bg-surface3 text-text",
-  ghost: "bg-transparent hover:bg-bg-surface2 text-text-secondary",
-  danger: "bg-danger/20 hover:bg-danger/30 text-danger",
+  primary: "bg-primary text-white shadow-[0_10px_24px_rgba(29,78,216,0.35)] hover:bg-primary-dark hover:shadow-[0_14px_30px_rgba(29,78,216,0.5)]",
+  secondary: "border border-border bg-bg-surface2 text-text hover:border-border-light hover:bg-bg-surface3",
+  ghost: "bg-transparent text-text-secondary hover:bg-bg-surface2 hover:text-text",
+  danger: "border border-danger/30 bg-danger/16 text-danger hover:bg-danger/24",
   gradient:
-    "bg-gradient-to-r from-primary to-accent text-white hover:opacity-90",
+    "bg-gradient-to-r from-primary via-primary-light to-accent text-white shadow-[0_12px_28px_rgba(14,165,233,0.35)] hover:brightness-110",
 };
 
 const sizeStyles: Record<ButtonSize, string> = {
-  sm: "px-3 py-1.5 text-sm rounded-lg gap-1.5",
-  md: "px-4 py-2 text-base rounded-xl gap-2",
-  lg: "px-6 py-3 text-lg rounded-xl gap-2.5",
+  sm: "rounded-lg px-3 py-1.5 text-sm gap-1.5",
+  md: "rounded-xl px-4 py-2 text-base gap-2",
+  lg: "rounded-xl px-6 py-3 text-lg gap-2.5",
 };
 
 export default function Button({
@@ -41,11 +41,11 @@ export default function Button({
   return (
     <button
       className={`
-        inline-flex items-center justify-center font-medium
+        inline-flex items-center justify-center font-semibold
         transition-all duration-200 ease-out
         focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2
         disabled:opacity-40 disabled:pointer-events-none
-        active:scale-[0.97]
+        active:scale-[0.98]
         ${variantStyles[variant]}
         ${sizeStyles[size]}
         ${fullWidth ? "w-full" : ""}

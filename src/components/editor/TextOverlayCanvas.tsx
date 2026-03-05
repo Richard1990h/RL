@@ -21,7 +21,6 @@ export default function TextOverlayCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ textId: string; offsetX: number; offsetY: number } | null>(null);
-  const animRef = useRef<number>(0);
 
   const activeOverlays = textOverlays.filter(
     (t) => playhead >= t.startTime && playhead <= t.endTime
@@ -72,12 +71,10 @@ export default function TextOverlayCanvas({
       ctx.fillText(overlay.text, x, y);
     }
 
-    animRef.current = requestAnimationFrame(draw);
   }, [activeOverlays, selectedTextId]);
 
   useEffect(() => {
-    animRef.current = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(animRef.current);
+    draw();
   }, [draw]);
 
   const getOverlayAtPosition = (clientX: number, clientY: number): TextOverlay | null => {

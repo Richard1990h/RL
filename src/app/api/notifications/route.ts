@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
       where.read = false;
     }
 
-    const [notifications, total, unreadCount] = await Promise.all([
+    const [rawNotifications, total, unreadCount] = await Promise.all([
       prisma.notification.findMany({
         where,
         orderBy: { createdAt: "desc" },
@@ -36,6 +36,26 @@ export async function GET(request: NextRequest) {
         where: { userId: user.id, read: false },
       }),
     ]);
+
+    // Resolve relatedId → username for user-related notification types (follow, friend_request, etc.)
+    const userRelatedTypes = new Set(["FOLLOW", "FRIEND_REQUEST", "FRIEND_ACCEPT"]);
+    const userIdsToResolve = rawNotifications
+      .filter((n) => n.relatedId && userRelatedTypes.has(n.type))
+      .map((n) => n.relatedId!);
+
+    let userMap: Record<string, string> = {};
+    if (userIdsToResolve.length > 0) {
+      const users = await prisma.user.findMany({
+        where: { id: { in: userIdsToResolve } },
+        select: { id: true, username: true },
+      });
+      userMap = Object.fromEntries(users.map((u) => [u.id, u.username]));
+    }
+
+    const notifications = rawNotifications.map((n) => ({
+      ...n,
+      relatedUsername: n.relatedId && userRelatedTypes.has(n.type) ? (userMap[n.relatedId] ?? null) : null,
+    }));
 
     return NextResponse.json({
       notifications,

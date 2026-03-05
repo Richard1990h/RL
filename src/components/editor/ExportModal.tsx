@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   Download,
   Loader2,
@@ -148,9 +148,11 @@ export default function ExportModal({
   }, [onClose]);
 
   // Reset title when videoTitle prop changes
-  if (videoTitle && title === "" && !showPublish) {
-    setTitle(videoTitle);
-  }
+  useEffect(() => {
+    if (videoTitle && title === "" && !showPublish) {
+      setTitle(videoTitle);
+    }
+  }, [videoTitle, showPublish]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Modal isOpen={isOpen} onClose={handleClose} title="Export Video" size="md">

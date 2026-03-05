@@ -8,6 +8,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: streamId } = await params;
+  const overlayMode = request.nextUrl.searchParams.get("overlay") === "1";
 
   const user = await getCurrentUser();
   if (!user) {
@@ -17,13 +18,41 @@ export async function GET(
 
   const stream = new ReadableStream({
     start(controller) {
-      addGameStateListener(streamId, userId, controller);
+      addGameStateListener(streamId, userId, controller, overlayMode ? "overlay" : "full");
 
       // Send current game state immediately if a game is active
       const engine = getGameEngine(streamId);
       if (engine) {
         const state = engine.currentState;
-        const payload = `event: game-state\ndata: ${JSON.stringify(state)}\nid: ${Date.now()}\n\n`;
+        const eventName = overlayMode ? "game-frame" : "game-state";
+        const payloadData = overlayMode
+          ? {
+              diff: {
+                gameId: state.gameId,
+                streamId: state.streamId,
+                mode: state.mode,
+                phase: state.phase,
+                round: state.round,
+                timeRemaining: state.timeRemaining,
+                winner: state.winner,
+                players: Object.fromEntries(
+                  Object.entries(state.players).map(([id, p]) => [
+                    id,
+                    { score: p.score, isEliminated: p.isEliminated },
+                  ])
+                ),
+                data: {
+                  units: state.data.units ?? [],
+                  baseHp: state.data.baseHp ?? {},
+                  objectiveTowerOwnerId: state.data.objectiveTowerOwnerId ?? null,
+                  lastEliminated: state.data.lastEliminated ?? null,
+                },
+                lastUpdate: state.lastUpdate,
+              },
+              ts: Date.now(),
+            }
+          : state;
+        const payload = `event: ${eventName}\ndata: ${JSON.stringify(payloadData)}\nid: ${Date.now()}\n\n`;
         controller.enqueue(new TextEncoder().encode(payload));
       }
 

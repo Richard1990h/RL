@@ -60,6 +60,8 @@ import type { User } from "@/lib/types";
 type MessageStatus = "sent" | "delivered" | "opened" | "received";
 type AutoDeleteOption = "immediately" | "after_24h" | "when_both_leave";
 type DefaultDeleteTimer = "immediately" | "5s" | "10s" | "30s" | "24h";
+type LeftPanelTab = "messages" | "friends";
+type FriendsTab = "friends" | "incoming" | "outgoing";
 
 interface ChatMessage {
   id: string;
@@ -443,12 +445,22 @@ export default function MessagesPage() {
   const [timeoutModal, setTimeoutModal] = useState<{ id: string; name: string } | null>(null);
   const [friendStatusMap, setFriendStatusMap] = useState<Record<string, "none" | "friends" | "request_sent" | "request_received">>({});
   const [friendTimeoutMap, setFriendTimeoutMap] = useState<Record<string, boolean>>({});
+  const [leftPanelTab, setLeftPanelTab] = useState<LeftPanelTab>("messages");
+  const [friendsTab, setFriendsTab] = useState<FriendsTab>("friends");
+  const [friendsSearch, setFriendsSearch] = useState("");
 
   // Friends store
   const {
+    friends: storeFriends,
+    incomingRequests,
+    outgoingRequests,
+    fetchFriends,
+    fetchIncomingRequests,
+    fetchOutgoingRequests,
     sendRequest: sendFriendRequest,
     cancelRequest: cancelFriendRequest,
     acceptRequest: acceptFriendRequest,
+    declineRequest: declineFriendRequest,
     removeFriend,
     setFriendTimeout,
   } = useFriendsStore();
@@ -752,6 +764,13 @@ export default function MessagesPage() {
     };
   }, [fetchConversations]);
 
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    fetchFriends();
+    fetchIncomingRequests();
+    fetchOutgoingRequests();
+  }, [currentUser?.id, fetchFriends, fetchIncomingRequests, fetchOutgoingRequests]);
+
   // Fetch friend status and timeout data — poll every 10s so sender sees acceptance
   const refreshFriendStatuses = useCallback(async () => {
     if (!friends.length) return;
@@ -822,6 +841,22 @@ export default function MessagesPage() {
   const filteredFriends = sortedFriends.filter((f) =>
     f.user.displayName.toLowerCase().includes(searchQuery.toLowerCase()) ||
     f.user.username.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+  const normalizedFriendsSearch = friendsSearch.trim().toLowerCase();
+  const filteredStoreFriends = storeFriends.filter((f) =>
+    !normalizedFriendsSearch ||
+    f.displayName.toLowerCase().includes(normalizedFriendsSearch) ||
+    f.username.toLowerCase().includes(normalizedFriendsSearch)
+  );
+  const filteredIncomingRequests = incomingRequests.filter((r) =>
+    !normalizedFriendsSearch ||
+    r.user.displayName.toLowerCase().includes(normalizedFriendsSearch) ||
+    r.user.username.toLowerCase().includes(normalizedFriendsSearch)
+  );
+  const filteredOutgoingRequests = outgoingRequests.filter((r) =>
+    !normalizedFriendsSearch ||
+    r.user.displayName.toLowerCase().includes(normalizedFriendsSearch) ||
+    r.user.username.toLowerCase().includes(normalizedFriendsSearch)
   );
 
   // Auto-scroll to bottom of messages
@@ -1597,6 +1632,19 @@ export default function MessagesPage() {
 
   // ─── Render: Friends List Panel ─────────────────────────────────────────
 
+  const openChatFromFriendsHub = (user: User) => {
+    setLeftPanelTab("messages");
+    setFriendsTab("friends");
+    setFriendsSearch("");
+    setBugChatActive(false);
+    const existingChat = friends.find((f) => f.user.id === user.id);
+    if (existingChat) {
+      setActiveChatId(user.id);
+      return;
+    }
+    startNewChat(user);
+  };
+
   const renderFriendsList = () => (
     <div className="flex h-full flex-col bg-[#0F0F14]">
       {/* Top bar */}
@@ -1619,13 +1667,36 @@ export default function MessagesPage() {
 
       {/* Search */}
       <div className="px-4 pb-3 pt-1">
+        <div className="mb-2 flex gap-1 rounded-lg bg-[#1A1A24] p-1">
+          <button
+            onClick={() => setLeftPanelTab("messages")}
+            className={cn(
+              "flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors",
+              leftPanelTab === "messages" ? "bg-[#24243A] text-text" : "text-text-muted hover:text-text"
+            )}
+          >
+            Chats
+          </button>
+          <button
+            onClick={() => setLeftPanelTab("friends")}
+            className={cn(
+              "flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors",
+              leftPanelTab === "friends" ? "bg-[#24243A] text-text" : "text-text-muted hover:text-text"
+            )}
+          >
+            Friends
+          </button>
+        </div>
         <div className="relative">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
           <input
             type="text"
-            placeholder="Search friends..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={leftPanelTab === "messages" ? "Search chats..." : "Search friends..."}
+            value={leftPanelTab === "messages" ? searchQuery : friendsSearch}
+            onChange={(e) => {
+              if (leftPanelTab === "messages") setSearchQuery(e.target.value);
+              else setFriendsSearch(e.target.value);
+            }}
             className="w-full rounded-full bg-[#1A1A24] py-2 pl-9 pr-4 text-sm text-text placeholder:text-text-muted outline-none focus:ring-1 focus:ring-[#8B5CF6]/40"
           />
         </div>
@@ -1633,6 +1704,140 @@ export default function MessagesPage() {
 
       {/* Friends list */}
       <div className="flex-1 overflow-y-auto">
+        {leftPanelTab === "friends" ? (
+          <div className="px-4 py-3">
+            <div className="mb-3 flex gap-1 rounded-lg bg-[#1A1A24] p-1">
+              <button
+                onClick={() => setFriendsTab("friends")}
+                className={cn(
+                  "flex-1 rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors",
+                  friendsTab === "friends" ? "bg-[#24243A] text-text" : "text-text-muted hover:text-text"
+                )}
+              >
+                Friends ({storeFriends.length})
+              </button>
+              <button
+                onClick={() => setFriendsTab("incoming")}
+                className={cn(
+                  "flex-1 rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors",
+                  friendsTab === "incoming" ? "bg-[#24243A] text-text" : "text-text-muted hover:text-text"
+                )}
+              >
+                Incoming ({incomingRequests.length})
+              </button>
+              <button
+                onClick={() => setFriendsTab("outgoing")}
+                className={cn(
+                  "flex-1 rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors",
+                  friendsTab === "outgoing" ? "bg-[#24243A] text-text" : "text-text-muted hover:text-text"
+                )}
+              >
+                Outgoing ({outgoingRequests.length})
+              </button>
+            </div>
+
+            {friendsTab === "friends" && (
+              filteredStoreFriends.length === 0 ? (
+                <p className="py-8 text-center text-sm text-text-muted">No friends found</p>
+              ) : (
+                <div className="space-y-1">
+                  {filteredStoreFriends.map((friend) => (
+                    <div
+                      key={friend.id}
+                      className="flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-[#1A1A24]"
+                    >
+                      <Avatar src={friend.avatarUrl} name={friend.displayName} size="sm" online={friend.isOnline} />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-text">{friend.displayName}</p>
+                        <p className="truncate text-xs text-text-muted">@{friend.username}</p>
+                      </div>
+                      <button
+                        onClick={() =>
+                          openChatFromFriendsHub({
+                            id: friend.id,
+                            username: friend.username,
+                            displayName: friend.displayName,
+                            email: "",
+                            avatarUrl: friend.avatarUrl,
+                            bio: null,
+                            verifiedBadge: false,
+                            isCreator: false,
+                            followerCount: 0,
+                            followingCount: 0,
+                          })
+                        }
+                        className="rounded-md bg-[#24243A] px-2.5 py-1 text-xs font-semibold text-text transition-colors hover:bg-[#2E2E48]"
+                      >
+                        Message
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+
+            {friendsTab === "incoming" && (
+              filteredIncomingRequests.length === 0 ? (
+                <p className="py-8 text-center text-sm text-text-muted">No incoming requests</p>
+              ) : (
+                <div className="space-y-1">
+                  {filteredIncomingRequests.map((req) => (
+                    <div
+                      key={req.id}
+                      className="flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-[#1A1A24]"
+                    >
+                      <Avatar src={req.user.avatarUrl} name={req.user.displayName} size="sm" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-text">{req.user.displayName}</p>
+                        <p className="truncate text-xs text-text-muted">@{req.user.username}</p>
+                      </div>
+                      <button
+                        onClick={() => acceptFriendRequest(req.user.id)}
+                        className="rounded-md bg-[#22C55E] px-2 py-1 text-xs font-semibold text-white transition-colors hover:bg-[#16A34A]"
+                      >
+                        Accept
+                      </button>
+                      <button
+                        onClick={() => declineFriendRequest(req.user.id)}
+                        className="rounded-md border border-[#2E2E48] px-2 py-1 text-xs font-semibold text-text-secondary transition-colors hover:text-text"
+                      >
+                        Decline
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+
+            {friendsTab === "outgoing" && (
+              filteredOutgoingRequests.length === 0 ? (
+                <p className="py-8 text-center text-sm text-text-muted">No outgoing requests</p>
+              ) : (
+                <div className="space-y-1">
+                  {filteredOutgoingRequests.map((req) => (
+                    <div
+                      key={req.id}
+                      className="flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-[#1A1A24]"
+                    >
+                      <Avatar src={req.user.avatarUrl} name={req.user.displayName} size="sm" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-text">{req.user.displayName}</p>
+                        <p className="truncate text-xs text-text-muted">@{req.user.username}</p>
+                      </div>
+                      <button
+                        onClick={() => cancelFriendRequest(req.user.id)}
+                        className="rounded-md border border-[#2E2E48] px-2 py-1 text-xs font-semibold text-text-secondary transition-colors hover:text-text"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+          </div>
+        ) : (
+          <>
         {/* Bug Report pinned chat */}
         <button
           onClick={() => {
@@ -1999,6 +2204,8 @@ export default function MessagesPage() {
             </div>
           ))
         )}
+          </>
+        )}
       </div>
     </div>
   );
@@ -2362,7 +2569,7 @@ export default function MessagesPage() {
               <AlertTriangle size={14} className="shrink-0 text-danger" />
               <span className="text-xs text-danger font-medium">Buy credits to send private messages</span>
               <a
-                href="/credits"
+                href="/wallet"
                 className="ml-auto rounded-full bg-[#8B5CF6] px-3 py-1 text-[10px] font-semibold text-white hover:bg-[#7C3AED]"
               >
                 Buy Credits

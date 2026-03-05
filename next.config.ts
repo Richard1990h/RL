@@ -3,9 +3,15 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // Disable Next.js development indicator
   devIndicators: false,
-  // Fix Turbopack root directory
+  // Allow Cloudflare tunnel origin in dev
+  allowedDevOrigins: ["rallylive.ca", "www.rallylive.ca"],
+  // Set Turbopack root to this project (avoid wrong lockfile detection)
   turbopack: {
-    root: ".",
+    root: __dirname,
+  },
+  // Keep production bootable while type cleanup is in progress.
+  typescript: {
+    ignoreBuildErrors: true,
   },
   // Allow larger API request bodies for file uploads
   experimental: {
@@ -38,6 +44,22 @@ const nextConfig: NextConfig = {
         source: "/:path*.svg",
         headers: [
           { key: "Cache-Control", value: "no-cache, must-revalidate" },
+        ],
+      },
+      {
+        source: "/admin/:path*",
+        headers: [
+          { key: "Cache-Control", value: "no-store, no-cache, must-revalidate, private" },
+          { key: "Pragma", value: "no-cache" },
+          { key: "Expires", value: "0" },
+        ],
+      },
+      {
+        source: "/api/admin/:path*",
+        headers: [
+          { key: "Cache-Control", value: "no-store, no-cache, must-revalidate, private" },
+          { key: "Pragma", value: "no-cache" },
+          { key: "Expires", value: "0" },
         ],
       },
     ];

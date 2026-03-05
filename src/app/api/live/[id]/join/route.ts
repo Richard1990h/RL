@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
+import { buildSessionEnvelope } from "@/lib/live/session-state";
 
 // POST: Join a live stream
 export async function POST(
@@ -26,7 +27,8 @@ export async function POST(
       return NextResponse.json({ error: "Live stream not found" }, { status: 404 });
     }
 
-    if (liveStream.status !== "LIVE") {
+    const session = buildSessionEnvelope(liveStream);
+    if (session.state !== "live") {
       return NextResponse.json({ error: "Live stream is not active" }, { status: 400 });
     }
 
@@ -41,6 +43,8 @@ export async function POST(
         participant: existingParticipant,
         viewerCount: liveStream.viewerCount,
         alreadyJoined: true,
+        session,
+        authority: { source: "server", ownerId: liveStream.hostId, actor: "viewer" },
       });
     }
 
@@ -55,12 +59,14 @@ export async function POST(
       }
     }
 
-    // Add participant
+    // Guests require host approval — create with PENDING status
+    const isGuest = role === "guest";
     const participant = await prisma.liveParticipant.create({
       data: {
         liveStreamId: id,
         userId: user.id,
-        role: role === "guest" ? "GUEST" : "VIEWER",
+        role: isGuest ? "GUEST" : "VIEWER",
+        status: isGuest ? "PENDING" : "ACTIVE",
       },
       include: {
         user: {
@@ -69,42 +75,53 @@ export async function POST(
       },
     });
 
-    // Increment viewer count and update peak
-    const updated = await prisma.liveStream.update({
-      where: { id },
-      data: {
-        viewerCount: { increment: 1 },
-        peakViewers: {
-          set: Math.max(liveStream.peakViewers, liveStream.viewerCount + 1),
+    // Only increment viewer count for active participants (viewers join immediately)
+    if (!isGuest) {
+      const updated = await prisma.liveStream.update({
+        where: { id },
+        data: {
+          viewerCount: { increment: 1 },
+          peakViewers: {
+            set: Math.max(liveStream.peakViewers, liveStream.viewerCount + 1),
+          },
         },
-      },
-    });
+      });
 
-    // Count how many times this user has watched this host's streams
-    const visitCount = await prisma.liveParticipant.count({
-      where: {
-        userId: user.id,
-        liveStream: { hostId: liveStream.hostId },
-      },
-    });
+      // Count how many times this user has watched this host's streams
+      const visitCount = await prisma.liveParticipant.count({
+        where: {
+          userId: user.id,
+          liveStream: { hostId: liveStream.hostId },
+        },
+      });
 
-    // Post a system welcome message in chat (visible to host, shows visit count)
-    await prisma.liveChatMessage.create({
-      data: {
-        liveStreamId: id,
-        userId: user.id,
-        text: `Welcome ${participant.user.displayName}! (Visit #${visitCount})`,
-        isDonation: false,
-        creditAmount: 0,
-      },
-    }).catch(() => {
-      // Best effort - don't fail the join if chat message fails
-    });
+      // Post a system welcome message in chat (visible to host, shows visit count)
+      await prisma.liveChatMessage.create({
+        data: {
+          liveStreamId: id,
+          userId: user.id,
+          text: `Welcome ${participant.user.displayName}! (Visit #${visitCount})`,
+          isDonation: false,
+          creditAmount: 0,
+        },
+      }).catch(() => {});
 
+      return NextResponse.json({
+        participant,
+        viewerCount: updated.viewerCount,
+        visitCount,
+        session,
+        authority: { source: "server", ownerId: liveStream.hostId, actor: "viewer" },
+      });
+    }
+
+    // Guest: return pending status
     return NextResponse.json({
       participant,
-      viewerCount: updated.viewerCount,
-      visitCount,
+      status: "PENDING",
+      message: "Request sent to host for approval",
+      session,
+      authority: { source: "server", ownerId: liveStream.hostId, actor: "viewer" },
     });
   } catch (error) {
     console.error("POST /api/live/[id]/join error:", error);

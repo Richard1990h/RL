@@ -5,12 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Home,
   MessageCircle,
-  Radio,
   PlusCircle,
-  Search,
-  Gift,
-  BarChart3,
-  TrendingUp,
   Wallet,
   Settings,
   LogOut,
@@ -19,7 +14,7 @@ import {
   Briefcase,
   Crown,
   Lock,
-  Users,
+  Shield,
 } from "lucide-react";
 import { useUIStore } from "@/stores/ui-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -39,15 +34,9 @@ interface NavItem {
 const navItems: NavItem[] = [
   { label: "Home", icon: Home, href: "/home" },
   { label: "Messages", icon: MessageCircle, href: "/messages", badge: 0, requiresAuth: true },
-  { label: "Friends", icon: Users, href: "/friends", badge: 0, requiresAuth: true },
-  { label: "Live", icon: Radio, href: "/live" },
-  { label: "Go Live", icon: Radio, href: "/go-live", requiresAuth: true, requiresGoLiveEligibility: true },
-  { label: "Upload", icon: PlusCircle, href: "/upload", requiresAuth: true },
-  { label: "Search", icon: Search, href: "/search" },
-  { label: "Credits", icon: Gift, href: "/credits", requiresAuth: true },
-  { label: "Creator Studio", icon: BarChart3, href: "/creator-studio", requiresAuth: true },
+  { label: "FiveM", icon: Shield, href: "/fivem" },
+  { label: "Upload/Stream", icon: PlusCircle, href: "/upload-stream", requiresAuth: true },
   { label: "Services", icon: Briefcase, href: "/services", requiresAuth: true },
-  { label: "Analytics", icon: TrendingUp, href: "/analytics", requiresAuth: true },
   { label: "Wallet", icon: Wallet, href: "/wallet", requiresAuth: true },
   { label: "Settings", icon: Settings, href: "/settings", requiresAuth: true },
   { label: "Admin", icon: Crown, href: "/admin", requiresAuth: true, requiresOwner: true },
@@ -86,7 +75,7 @@ export function Sidebar() {
     if (item.requiresAuth && !isLoggedIn) return false;
     return true;
   }).map((item) => {
-    if (item.label === "Friends") return { ...item, badge: incomingCount };
+    if (item.label === "Messages") return { ...item, badge: incomingCount };
     return item;
   });
 
@@ -98,12 +87,12 @@ export function Sidebar() {
 
   return (
     <aside
-      className={`fixed right-0 top-0 z-40 hidden h-screen flex-col border-l border-border bg-bg-surface transition-all duration-300 md:flex ${
+      className={`fixed right-0 top-0 z-40 hidden h-screen flex-col border-l border-border/80 bg-bg-surface/92 backdrop-blur-lg transition-all duration-300 lg:flex ${
         sidebarCollapsed ? "w-16" : "w-60"
       }`}
     >
       {/* Logo */}
-      <div className="flex h-16 items-center gap-3 border-b border-border px-4">
+      <div className="flex h-16 items-center gap-3 border-b border-border/80 px-4">
         <Link href="/home" className="flex items-center gap-3">
           <img src="/logo.png?v=3" alt="Rally Live" className="h-9 w-9 object-contain" />
           {!sidebarCollapsed && (
@@ -124,7 +113,7 @@ export function Sidebar() {
               return (
                 <li key={item.label}>
                   <div
-                    className="group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-text-muted/50 cursor-not-allowed"
+                    className="group relative cursor-not-allowed items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-sm font-medium text-text-muted/50"
                     title={sidebarCollapsed
                       ? `${item.label} (Locked)`
                       : `Requires 5 videos, 100 impression views & 50 likes (${goLiveInfo?.videos ?? 0}/5 videos, ${goLiveInfo?.views ?? 0}/100 impression views, ${goLiveInfo?.likes ?? 0}/50 likes)`
@@ -148,10 +137,10 @@ export function Sidebar() {
               <li key={item.label}>
                 <Link
                   href={item.href}
-                  className={`group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                  className={`group relative flex items-center gap-3 rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors ${
                     active
-                      ? "bg-bg-surface2 text-text"
-                      : "text-text-secondary hover:bg-bg-surface2/50 hover:text-text"
+                      ? "border-primary/30 bg-primary/12 text-text shadow-[0_10px_20px_rgba(37,99,235,0.2)]"
+                      : "border-transparent text-text-secondary hover:border-border hover:bg-bg-surface2/70 hover:text-text"
                   }`}
                   title={sidebarCollapsed ? item.label : undefined}
                 >
@@ -192,14 +181,14 @@ export function Sidebar() {
       {/* Collapse toggle */}
       <button
         onClick={collapseSidebar}
-        className="mx-2 mb-2 flex items-center justify-center rounded-lg p-2 text-text-muted transition-colors hover:bg-bg-surface2 hover:text-text"
+        className="mx-2 mb-2 flex items-center justify-center rounded-xl border border-transparent p-2 text-text-muted transition-colors hover:border-border hover:bg-bg-surface2 hover:text-text"
         aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
       >
         {sidebarCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
       </button>
 
       {/* User section */}
-      <div className="border-t border-border p-3">
+      <div className="border-t border-border/80 p-3">
         {currentUser ? (
           <div className={`flex items-center gap-3 ${sidebarCollapsed ? "justify-center" : ""}`}>
             <Link href={`/profile/${currentUser.username}`}>
@@ -232,7 +221,7 @@ export function Sidebar() {
         ) : (
           <Link
             href="/login"
-            className={`flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-primary-dark ${
+            className={`flex items-center justify-center rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-primary-dark ${
               sidebarCollapsed ? "px-2" : ""
             }`}
           >

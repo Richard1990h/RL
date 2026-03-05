@@ -22,12 +22,27 @@ export async function POST(
     return NextResponse.json({ error: "Recording not found or not owned" }, { status: 403 });
   }
 
-  if (!recording.filePath) {
+  // Allow filePath to be passed in the body (from client after chunk upload finalization)
+  let filePath = recording.filePath;
+  try {
+    const body = await request.json();
+    if (body.filePath) {
+      filePath = body.filePath;
+      await prisma.recording.update({
+        where: { id: recordingId },
+        data: { filePath },
+      });
+    }
+  } catch {
+    // No body or invalid JSON — use existing filePath
+  }
+
+  if (!filePath) {
     return NextResponse.json({ error: "No file path set" }, { status: 400 });
   }
 
   // Start processing in the background
-  mergeRecordingChunks(recordingId, recording.filePath).catch((err) => {
+  mergeRecordingChunks(recordingId, filePath).catch((err) => {
     console.error(`[recordings] Failed to process recording ${recordingId}:`, err);
   });
 

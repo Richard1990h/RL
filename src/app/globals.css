@@ -1,31 +1,31 @@
 @import "tailwindcss";
 
 @theme inline {
-  /* Colors - dark theme by default */
-  --color-bg: #0F0F14;
-  --color-bg-surface: #1A1A24;
-  --color-bg-surface2: #24243A;
-  --color-bg-surface3: #2E2E48;
-  --color-primary: #8B5CF6;
-  --color-primary-light: #A78BFA;
-  --color-primary-dark: #7C3AED;
-  --color-accent: #06B6D4;
-  --color-accent-light: #22D3EE;
-  --color-success: #10B981;
-  --color-warning: #F59E0B;
-  --color-danger: #EF4444;
-  --color-text: #F1F1F6;
-  --color-text-secondary: #9CA3AF;
-  --color-text-muted: #6B7280;
-  --color-border: #2E2E48;
-  --color-border-light: #3F3F5C;
+  /* Colors */
+  --color-bg: #090d14;
+  --color-bg-surface: #121824;
+  --color-bg-surface2: #1a2232;
+  --color-bg-surface3: #243048;
+  --color-primary: #1d4ed8;
+  --color-primary-light: #3b82f6;
+  --color-primary-dark: #1e40af;
+  --color-accent: #06b6d4;
+  --color-accent-light: #22d3ee;
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  --color-text: #f7fafc;
+  --color-text-secondary: #c6cfdf;
+  --color-text-muted: #8d9bb2;
+  --color-border: #27344b;
+  --color-border-light: #354560;
 
   /* Gradient */
-  --color-gradient-start: #8B5CF6;
-  --color-gradient-end: #06B6D4;
+  --color-gradient-start: #2563eb;
+  --color-gradient-end: #0ea5e9;
 
   /* Typography */
-  --font-sans: var(--font-geist-sans), system-ui, sans-serif;
+  --font-sans: var(--font-manrope), "Segoe UI", system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), monospace;
 
   /* Font sizes */
@@ -53,17 +53,69 @@
   --radius-full: 9999px;
 
   /* Shadows */
-  --shadow-subtle: 0 1px 3px rgba(0,0,0,0.3);
-  --shadow-medium: 0 4px 12px rgba(0,0,0,0.4);
-  --shadow-glow: 0 0 20px rgba(139,92,246,0.3);
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.25);
+  --shadow-medium: 0 12px 30px rgba(1, 7, 19, 0.45);
+  --shadow-glow: 0 0 20px rgba(14, 165, 233, 0.25);
 }
 
 /* Base styles */
+html {
+  height: 100%;
+  overflow: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
 body {
-  background: var(--color-bg);
+  position: relative;
+  height: 100%;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(37, 99, 235, 0.15), transparent 30%),
+    radial-gradient(circle at 88% 8%, rgba(6, 182, 212, 0.12), transparent 32%),
+    linear-gradient(180deg, #090d14 0%, #080b12 35%, #0b1018 100%);
   color: var(--color-text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  overflow: hidden;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(circle at center, black 30%, transparent 85%);
+  z-index: -1;
+}
+
+html.video-immersive,
+html.video-immersive body {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  overscroll-behavior: none !important;
+  overflow: hidden !important;
+}
+
+html.video-immersive [data-app-shell] {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  overflow: hidden !important;
+}
+
+html.video-immersive [data-app-main] {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+  touch-action: none !important;
 }
 
 /* Scrollbar */
@@ -101,6 +153,13 @@ body {
   50% { opacity: 0.5; }
 }
 .animate-pulse-live { animation: pulse-live 1.5s ease-in-out infinite; }
+
+/* Strobe glow for updated items needing attention */
+@keyframes strobe-glow {
+  0%, 100% { box-shadow: 0 0 4px currentColor; opacity: 1; }
+  50% { box-shadow: 0 0 14px currentColor, 0 0 28px currentColor; opacity: 0.85; }
+}
+.animate-strobe { animation: strobe-glow 1.8s ease-in-out infinite; }
 
 /* Fullscreen video — prevent rotation on desktop, fill screen */
 :fullscreen {
@@ -159,3 +218,374 @@ body {
 /* Hide scrollbar utility */
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ============================================================
+   BATTLE BAR ANIMATIONS
+   ============================================================ */
+
+@keyframes battle-bar-pulse {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.3); }
+}
+.animate-battle-bar-pulse { animation: battle-bar-pulse 0.4s ease-out; }
+
+@keyframes battle-bar-glow {
+  0%, 100% { box-shadow: 0 0 8px currentColor; }
+  50% { box-shadow: 0 0 24px currentColor; }
+}
+.animate-battle-bar-glow { animation: battle-bar-glow 1.5s ease-in-out infinite; }
+
+/* ============================================================
+   VICTORY LAP ANIMATIONS
+   ============================================================ */
+
+@keyframes confetti-fall {
+  0% { transform: translateY(-100vh) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+}
+.animate-confetti { animation: confetti-fall 4s ease-out forwards; }
+
+@keyframes winner-glow {
+  0%, 100% { box-shadow: 0 0 40px #f59e0b; }
+  50% { box-shadow: 0 0 80px #f59e0b, 0 0 120px #f59e0b40; }
+}
+.animate-winner-glow { animation: winner-glow 2s ease-in-out infinite; }
+
+@keyframes winner-scale {
+  0% { transform: scale(0.8); opacity: 0; }
+  50% { transform: scale(1.1); }
+  100% { transform: scale(1); opacity: 1; }
+}
+.animate-winner-scale { animation: winner-scale 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
+
+/* ============================================================
+   TAKEOVER GIFT ANIMATIONS (Full-screen premium gifts)
+   ============================================================ */
+
+@keyframes takeover-bg {
+  0% { opacity: 0; }
+  10% { opacity: 0.85; }
+  85% { opacity: 0.85; }
+  100% { opacity: 0; }
+}
+.animate-takeover-bg { animation: takeover-bg 6s ease-out forwards; }
+
+@keyframes takeover-icon {
+  0% { transform: scale(0) rotate(-30deg); opacity: 0; }
+  30% { transform: scale(1.5) rotate(10deg); opacity: 1; }
+  50% { transform: scale(1.2) rotate(-5deg); }
+  70% { transform: scale(1.3) rotate(3deg); }
+  100% { transform: scale(1) rotate(0); }
+}
+.animate-takeover-icon { animation: takeover-icon 1.2s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
+
+@keyframes takeover-amount {
+  0% { opacity: 0; transform: scale(0.5) translateY(20px); }
+  50% { transform: scale(1.1) translateY(-5px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.animate-takeover-amount { animation: takeover-amount 0.8s ease-out 0.6s forwards; }
+
+@keyframes takeover-particles {
+  0% { transform: translate(-50%, -50%) scale(0); opacity: 1; }
+  100% { transform: translate(-50%, -50%) scale(3); opacity: 0; }
+}
+.animate-takeover-particles { animation: takeover-particles 1.5s ease-out forwards; }
+
+/* ============================================================
+   MAGIC MIST EFFECT (Score hiding)
+   ============================================================ */
+
+@keyframes mist-flow {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+.animate-mist-flow {
+  background-size: 200% 100%;
+  animation: mist-flow 2s linear infinite;
+}
+
+@keyframes mist-float {
+  0%, 100% { transform: translateY(0) scale(1); opacity: 0.7; }
+  50% { transform: translateY(-5px) scale(1.05); opacity: 1; }
+}
+.animate-mist-float { animation: mist-float 2s ease-in-out infinite; }
+
+/* ============================================================
+   POWER-UP ANIMATIONS
+   ============================================================ */
+
+@keyframes power-up-activate {
+  0% { transform: scale(1); }
+  25% { transform: scale(1.2); }
+  50% { transform: scale(0.9); }
+  75% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+.animate-power-up-activate { animation: power-up-activate 0.5s ease-out; }
+
+@keyframes power-up-glow {
+  0%, 100% { box-shadow: 0 0 10px var(--power-up-color, #8B5CF6); }
+  50% { box-shadow: 0 0 30px var(--power-up-color, #8B5CF6), 0 0 60px var(--power-up-color, #8B5CF6)40; }
+}
+.animate-power-up-glow { animation: power-up-glow 1s ease-in-out infinite; }
+
+@keyframes timer-add {
+  0% { transform: translateY(0) scale(1); opacity: 1; }
+  100% { transform: translateY(-40px) scale(1.5); opacity: 0; }
+}
+.animate-timer-add { animation: timer-add 1s ease-out forwards; }
+
+/* ============================================================
+   TEAM BATTLE ANIMATIONS
+   ============================================================ */
+
+@keyframes team-pulse-blue {
+  0%, 100% { border-color: #3b82f6; box-shadow: 0 0 20px #3b82f640; }
+  50% { border-color: #60a5fa; box-shadow: 0 0 40px #3b82f660; }
+}
+.animate-team-blue { animation: team-pulse-blue 2s ease-in-out infinite; }
+
+@keyframes team-pulse-red {
+  0%, 100% { border-color: #ef4444; box-shadow: 0 0 20px #ef444440; }
+  50% { border-color: #f87171; box-shadow: 0 0 40px #ef444460; }
+}
+.animate-team-red { animation: team-pulse-red 2s ease-in-out infinite; }
+
+/* ============================================================
+   SCORE ANIMATIONS
+   ============================================================ */
+
+@keyframes score-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+  100% { transform: scale(1); }
+}
+.animate-score-pop { animation: score-pop 0.3s ease-out; }
+
+@keyframes score-increment {
+  0% { transform: translateY(0); opacity: 1; color: var(--color-success); }
+  100% { transform: translateY(-30px); opacity: 0; }
+}
+.animate-score-increment { animation: score-increment 0.8s ease-out forwards; }
+
+/* ============================================================
+   ADMIN PANEL MOBILE OVERRIDES
+   Applies below 1024px (phones + tablets)
+   ============================================================ */
+
+.admin-mobile.session-mode .session-container {
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+@media (max-width: 1023px) {
+  .admin-mobile.session-mode {
+    padding: 6px !important;
+  }
+
+  .admin-mobile.session-mode .admin-tabs {
+    margin-bottom: 6px !important;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .admin-mobile.session-mode .admin-header {
+    margin-bottom: 6px !important;
+  }
+
+  .admin-mobile .conversation-shell {
+    border-radius: 16px !important;
+    border-color: #262634 !important;
+    background: linear-gradient(180deg, #11131a 0%, #0d0f16 100%) !important;
+  }
+
+  /* Prevent iOS/Android zoom on input focus */
+  .admin-mobile input,
+  .admin-mobile textarea,
+  .admin-mobile select {
+    font-size: 16px !important;
+  }
+
+  /* ---- MESSAGE TEXT ---- */
+  .admin-mobile .msg-content {
+    font-size: 17px !important;
+    line-height: 1.7 !important;
+    font-family: var(--font-sans) !important;
+    letter-spacing: 0.01em;
+    word-break: break-word !important;
+    color: #f5f7ff !important;
+  }
+
+  .admin-mobile .msg-role { font-size: 16px !important; }
+  .admin-mobile .msg-status { font-size: 14px !important; }
+  .admin-mobile .msg-time { display: none !important; }
+  .admin-mobile .msg-thinking { font-size: 15px !important; line-height: 1.5 !important; }
+  .admin-mobile .bridge-indicator { font-size: 14px !important; }
+  .admin-mobile .input-helper { font-size: 12px !important; }
+
+  /* ---- BUTTONS — minimum 48px tall, full width ---- */
+  .admin-mobile .msg-btn {
+    padding: 14px 20px !important;
+    font-size: 16px !important;
+    min-height: 48px !important;
+    border-radius: 12px !important;
+    flex: 1 !important;
+    justify-content: center !important;
+  }
+
+  /* Button rows stack or fill width */
+  .admin-mobile .btn-row {
+    display: flex !important;
+    gap: 8px !important;
+    width: 100% !important;
+  }
+  .admin-mobile .desktop-controls-row {
+    display: none !important;
+  }
+  .admin-mobile .mobile-controls-row {
+    display: flex !important;
+  }
+
+  /* Tool badges */
+  .admin-mobile .tool-badge {
+    font-size: 14px !important;
+    padding: 8px 12px !important;
+    min-height: 36px;
+    border-radius: 8px !important;
+  }
+
+  /* ---- MESSAGE CARDS ---- */
+  .admin-mobile .msg-card {
+    padding: 14px !important;
+    border-radius: 16px !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+    content-visibility: auto;
+    contain-intrinsic-size: 220px;
+    border-color: #3a3a4f !important;
+  }
+
+  .admin-mobile .msg-card-assistant {
+    margin-right: auto !important;
+    border-top-left-radius: 8px !important;
+    border-top-right-radius: 16px !important;
+    background: linear-gradient(180deg, #1a1c28 0%, #151722 100%) !important;
+  }
+
+  .admin-mobile .msg-card-user {
+    margin-left: auto !important;
+    border-top-left-radius: 16px !important;
+    border-top-right-radius: 8px !important;
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.22), rgba(59, 130, 246, 0.14)) !important;
+  }
+
+  /* ---- TAB BAR — icons only on narrow, scrollable ---- */
+  .admin-mobile .admin-tabs {
+    gap: 2px !important;
+    padding: 3px !important;
+  }
+  .admin-mobile .admin-tabs button {
+    padding: 10px 12px !important;
+    font-size: 13px !important;
+    min-height: 48px !important;
+    min-width: 48px !important;
+  }
+  .admin-mobile .admin-tabs .tab-label {
+    display: none !important;
+  }
+
+  /* Session header */
+  .admin-mobile .session-header-row { flex-wrap: wrap; gap: 8px; }
+  .admin-mobile .desktop-only { display: none !important; }
+
+  /* ---- CONTROLS ROW — stack vertically ---- */
+  .admin-mobile .controls-row {
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 8px !important;
+    overflow-x: auto !important;
+    white-space: nowrap !important;
+    padding-bottom: 2px !important;
+  }
+  .admin-mobile .controls-row > * {
+    width: auto !important;
+    flex: 0 0 auto !important;
+    justify-content: center !important;
+  }
+  .admin-mobile .controls-row .speed-row {
+    display: flex !important;
+    justify-content: center !important;
+    gap: 4px !important;
+  }
+  .admin-mobile .controls-row .speed-row button {
+    min-width: 44px !important;
+    min-height: 44px !important;
+    font-size: 14px !important;
+  }
+
+  /* ---- SESSION CONTAINER — use dvh for keyboard ---- */
+  .admin-mobile .session-container {
+    max-height: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+    contain: layout style paint;
+  }
+
+  .admin-mobile .session-input-area {
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+    backdrop-filter: none;
+    background: rgba(17, 17, 20, 0.94);
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .admin-mobile .conversation-composer-input {
+    min-height: 48px !important;
+    max-height: 120px !important;
+    line-height: 1.35 !important;
+    border-radius: 14px !important;
+  }
+
+  .admin-mobile .session-input-area .input-helper,
+  .admin-mobile .session-input-area .bridge-detail {
+    display: none !important;
+  }
+}
+
+/* Session readability on larger screens too */
+.msg-content {
+  font-family: var(--font-sans);
+  line-height: 1.6;
+  letter-spacing: 0.008em;
+}
+
+.conversation-shell .msg-card-assistant {
+  background: linear-gradient(180deg, rgba(30, 33, 42, 0.95), rgba(24, 26, 34, 0.95));
+}
+
+.conversation-shell .msg-card-user {
+  background: linear-gradient(135deg, rgba(44, 103, 255, 0.22), rgba(71, 120, 245, 0.14));
+}
+
+/* ============================================================
+   EXTRA NARROW SCREENS (Fold front screen, small phones)
+   Below 360px CSS width
+   ============================================================ */
+@media (max-width: 359px) {
+  .admin-mobile .msg-content {
+    font-size: 16px !important;
+  }
+  .admin-mobile .msg-btn {
+    padding: 12px 10px !important;
+    font-size: 15px !important;
+  }
+  .admin-mobile .admin-tabs button {
+    padding: 10px 8px !important;
+  }
+}

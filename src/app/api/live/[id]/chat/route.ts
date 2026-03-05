@@ -11,7 +11,7 @@ export async function GET(
   try {
     const { id } = await params;
     const { searchParams } = new URL(request.url);
-    const limit = parseInt(searchParams.get("limit") || "50", 10);
+    const limit = Math.min(200, Math.max(1, parseInt(searchParams.get("limit") || "50", 10)));
     const before = searchParams.get("before");
 
     const liveStream = await prisma.liveStream.findUnique({ where: { id } });
@@ -104,14 +104,19 @@ export async function POST(
         return NextResponse.json({ error: "Insufficient credits" }, { status: 402 });
       }
 
-      // Execute donation atomically — double-entry ledger
-      await prisma.$transaction(async (tx) => {
+      // Execute donation + chat message atomically — double-entry ledger
+      const chatMessage = await prisma.$transaction(async (tx) => {
         // Ensure host wallet exists
         await tx.wallet.upsert({
           where: { userId: liveStream.hostId },
           update: {},
           create: { userId: liveStream.hostId },
         });
+
+        // Apply host cut (default 80% to host, 20% platform)
+        const hostCutPct = liveStream.hostCutPercent ?? 80;
+        const hostShare = Math.floor(creditAmount * hostCutPct / 100);
+        const platformShare = creditAmount - hostShare;
 
         // Create transaction records
         const senderTx = await tx.transaction.create({
@@ -130,49 +135,92 @@ export async function POST(
             userId: liveStream.hostId,
             type: "CREDIT_EARNED",
             amountCents: 0,
-            credits: creditAmount,
-            description: `Donation received from ${user.username} in live stream`,
+            credits: hostShare,
+            description: `Donation received from ${user.username} in live stream (${hostCutPct}% of ${creditAmount})`,
             status: "COMPLETED",
           },
         });
 
         // Double-entry ledger
-        await insertLedgerEntries(tx, [
+        const ledgerEntries = [
           {
             userId: user.id,
             deltaCredits: -creditAmount,
-            type: "DONATION_OUT",
+            type: "DONATION_OUT" as const,
             referenceId: senderTx.id,
             description: `Live donation to ${liveStream.title}`,
           },
           {
             userId: liveStream.hostId,
-            deltaCredits: creditAmount,
-            type: "DONATION_IN",
+            deltaCredits: hostShare,
+            type: "DONATION_IN" as const,
             referenceId: senderTx.id,
             description: `Live donation from ${user.username}`,
           },
-        ]);
+        ];
 
-        // Update totalSpent/totalEarned separately
+        // Platform share to treasury if applicable
+        if (platformShare > 0) {
+          const { getTreasuryUserId } = await import("@/lib/treasury");
+          const treasuryUserId = await getTreasuryUserId();
+          ledgerEntries.push({
+            userId: treasuryUserId,
+            deltaCredits: platformShare,
+            type: "PLATFORM_FEE" as const,
+            referenceId: senderTx.id,
+            description: `Platform share from live donation`,
+          });
+          await tx.wallet.update({
+            where: { userId: treasuryUserId },
+            data: { totalEarned: { increment: platformShare } },
+          });
+        }
+
+        await insertLedgerEntries(tx, ledgerEntries);
+
+        // Update totalSpent/totalEarned
         await tx.wallet.update({
           where: { userId: user.id },
           data: { totalSpent: { increment: creditAmount } },
         });
         await tx.wallet.update({
           where: { userId: liveStream.hostId },
-          data: { totalEarned: { increment: creditAmount } },
+          data: { totalEarned: { increment: hostShare } },
+        });
+
+        // Create chat message inside the transaction
+        return tx.liveChatMessage.create({
+          data: {
+            liveStreamId: id,
+            userId: user.id,
+            text,
+            isDonation: true,
+            creditAmount: creditAmount || 0,
+          },
         });
       });
+
+      return NextResponse.json({
+        message: {
+          ...chatMessage,
+          user: {
+            id: user.id,
+            username: user.username,
+            displayName: user.displayName,
+            avatarUrl: user.avatarUrl,
+          },
+        },
+      }, { status: 201 });
     }
 
+    // Non-donation chat message
     const chatMessage = await prisma.liveChatMessage.create({
       data: {
         liveStreamId: id,
         userId: user.id,
         text,
-        isDonation: isDonation ?? false,
-        creditAmount: isDonation ? (creditAmount || 0) : 0,
+        isDonation: false,
+        creditAmount: 0,
       },
     });
 

@@ -8,7 +8,6 @@ interface NotificationState {
   pollInterval: ReturnType<typeof setInterval> | null;
 
   fetchUnreadCount: () => Promise<void>;
-  markAllRead: () => Promise<void>;
   clearPrivateHighlight: () => void;
   startPolling: () => void;
   stopPolling: () => void;
@@ -31,15 +30,6 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       );
       const prev = get().unreadCount;
       set({ prevUnreadCount: prev, unreadCount: res.unreadCount, hasPrivateMessage: hasPrivate });
-    } catch {
-      // silently fail
-    }
-  },
-
-  markAllRead: async () => {
-    try {
-      await api.notifications.markRead({ all: true });
-      set({ unreadCount: 0, hasPrivateMessage: false });
     } catch {
       // silently fail
     }

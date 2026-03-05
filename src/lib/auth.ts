@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { prisma } from "./db";
+import { isAccountRestricted, isOwnerDeviceGateEnforced } from "./security-policy";
 
 const JWT_SECRET = process.env.JWT_SECRET!;
 if (!process.env.JWT_SECRET) {
@@ -78,22 +79,25 @@ export async function requireAuth() {
   if (!user) {
     throw new Error("Unauthorized");
   }
+  if (isAccountRestricted(user)) {
+    throw new Error("Unauthorized");
+  }
   return user;
 }
 
 export async function requireOwnerWithDevice() {
-  const user = await getCurrentUser();
-  if (!user) {
-    throw new Error("Unauthorized");
-  }
+  const user = await requireAuth();
   if (!user.isOwner) {
     throw new Error("Forbidden");
   }
-  // Dynamic import to avoid circular deps
-  const { isDeviceAllowed } = await import("./device-auth");
-  const allowed = await isDeviceAllowed();
-  if (!allowed) {
-    throw new Error("Device not allowed");
+  const enforceDeviceGate = isOwnerDeviceGateEnforced();
+  if (enforceDeviceGate) {
+    // Dynamic import to avoid circular deps
+    const { isDeviceAllowed } = await import("./device-auth");
+    const allowed = await isDeviceAllowed();
+    if (!allowed) {
+      throw new Error("Device not allowed");
+    }
   }
   return user;
 }

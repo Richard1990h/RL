@@ -2,14 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { v4 as uuidv4 } from "uuid";
+import { buildSessionEnvelope, canTransition, statusToSessionState } from "@/lib/live/session-state";
 
 // GET: List active live streams
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const mode = searchParams.get("mode") || "all";
-    const page = parseInt(searchParams.get("page") || "1", 10);
-    const limit = parseInt(searchParams.get("limit") || "20", 10);
+    const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "20", 10) || 1));
     const skip = (page - 1) * limit;
 
     // Auto-end stale streams: if the host hasn't sent a heartbeat in 2+ minutes,
@@ -92,7 +93,10 @@ export async function GET(request: NextRequest) {
         participants: [],
         startTime: s.startedAt?.toISOString() ?? s.createdAt.toISOString(),
         roundTimeSec: s.roundTimeSec,
+        hostCutPercent: s.hostCutPercent,
         host: s.host,
+        session: buildSessionEnvelope(s),
+        authority: { source: "server", ownerId: s.hostId },
       }))
       .filter((s) => {
         if (seenHosts.has(s.hostId)) return false;
@@ -171,7 +175,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { title, tags, isBattle, mode, roundTimeSec, minDonation, bgColor, bgImageUrl } = body;
+    const { title, tags, isBattle, mode, roundTimeSec, minDonation, bgColor, bgImageUrl, hostCutPercent } = body;
 
     if (!title) {
       return NextResponse.json({ error: "title is required" }, { status: 400 });
@@ -183,6 +187,11 @@ export async function POST(request: NextRequest) {
     if (!validModes.includes(normalizedMode)) {
       return NextResponse.json({ error: `Invalid mode. Must be one of: ${validModes.join(", ")}` }, { status: 400 });
     }
+
+    // Validate hostCutPercent
+    const validatedHostCut = typeof hostCutPercent === "number" && Number.isInteger(hostCutPercent) && hostCutPercent >= 0 && hostCutPercent <= 100
+      ? hostCutPercent
+      : 0;
 
     // Validate bgColor format if provided
     if (bgColor && !/^#[0-9A-Fa-f]{3,8}$/.test(bgColor)) {
@@ -209,6 +218,11 @@ export async function POST(request: NextRequest) {
     // Generate unique stream key
     const streamKey = `rly_${uuidv4().replace(/-/g, "")}`;
 
+    const createFrom = statusToSessionState("WAITING", `new_${user.id}`);
+    if (!canTransition(createFrom, "live")) {
+      return NextResponse.json({ error: "Invalid session transition while creating stream" }, { status: 409 });
+    }
+
     const liveStream = await prisma.liveStream.create({
       data: {
         hostId: user.id,
@@ -218,6 +232,7 @@ export async function POST(request: NextRequest) {
         mode: normalizedMode,
         roundTimeSec: roundTimeSec || 0,
         minDonation: minDonation || 0,
+        hostCutPercent: validatedHostCut,
         bgColor: bgColor || null,
         bgImageUrl: bgImageUrl || null,
         streamKey,
@@ -240,7 +255,11 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    return NextResponse.json({ liveStream }, { status: 201 });
+    return NextResponse.json({
+      liveStream,
+      session: buildSessionEnvelope(liveStream),
+      authority: { source: "server", ownerId: liveStream.hostId },
+    }, { status: 201 });
   } catch (error) {
     console.error("POST /api/live error:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Camera, Mic, Volume2, ChevronDown } from "lucide-react";
+import { Camera, Mic, ChevronDown } from "lucide-react";
 import { enumerateDevices, type DeviceInfo } from "@/lib/media/device-manager";
 import { cn } from "@/lib/utils";
 

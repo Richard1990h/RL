@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type TouchEvent } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { useRouter } from "next/navigation";
 import Card from "@/components/ui/Card";
@@ -58,6 +58,9 @@ import {
   Sparkles,
   Megaphone,
   Play,
+  Mic,
+  MicOff,
+  MoreVertical,
 } from "lucide-react";
 
 interface AdminStats {
@@ -168,6 +171,17 @@ interface BridgeWindow {
   label: string;
   projectDir: string;
   commandLine: string;
+  isCodex?: boolean;
+  isTerminal?: boolean;
+}
+
+function isClaudeWindow(w: BridgeWindow): boolean {
+  if (w.projectDir || w.isCodex) return true;
+  const proc = (w.procName || "").toLowerCase().replace(".exe", "");
+  if (proc === "claude" || proc === "claude-code" || proc === "codex") return true;
+  const title = (w.title || "").toLowerCase();
+  if (title.includes("claude") && !title.includes("claude_bridge") && !title.includes("claude-bridge")) return true;
+  return false;
 }
 
 interface BridgeLogEntry {
@@ -177,7 +191,72 @@ interface BridgeLogEntry {
   status: string;
 }
 
+interface RuntimeServiceState {
+  ok: boolean;
+  detail: string;
+}
+
+interface RuntimeHealth {
+  ok: boolean;
+  services: {
+    website: RuntimeServiceState;
+    bridge: RuntimeServiceState;
+    watchdog: RuntimeServiceState;
+    cloudflare: RuntimeServiceState;
+  };
+  checkedAt: string;
+}
+
+interface DictationAlternative {
+  transcript: string;
+}
+
+interface DictationResult {
+  isFinal: boolean;
+  length: number;
+  [index: number]: DictationAlternative;
+}
+
+interface DictationResultList {
+  length: number;
+  [index: number]: DictationResult;
+}
+
+interface DictationEvent {
+  resultIndex: number;
+  results: DictationResultList;
+}
+
+interface BrowserSpeechRecognition {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onstart: (() => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onresult: ((event: DictationEvent) => void) | null;
+  start: () => void;
+  stop: () => void;
+}
+
+type BrowserSpeechRecognitionCtor = new () => BrowserSpeechRecognition;
+
+interface BridgeLogPayload {
+  log?: BridgeLogEntry[];
+  selectedHwnd?: string | null;
+  selectedTitle?: string;
+  selectedLabel?: string;
+  selectedProjectDir?: string;
+  monitorTargets?: { hwnd: string; pid: string; title: string; label: string; projectDir: string | null }[];
+  status?: "waiting" | "active" | "error" | "offline";
+  statusReason?: string;
+  statusUpdatedAt?: string;
+  error?: string;
+  bridgeStatusCode?: number;
+}
+
 export default function AdminPage() {
+  const MESSAGE_RENDER_BATCH = 120;
   const { currentUser, isLoggedIn, isLoading } = useAuthStore();
   const router = useRouter();
   const [stats, setStats] = useState<AdminStats | null>(null);
@@ -201,17 +280,34 @@ export default function AdminPage() {
   const [claudeMessages, setClaudeMessages] = useState<ClaudeMessage[]>([]);
   const [claudeSessionFile, setClaudeSessionFile] = useState("");
   const [claudeTotalLines, setClaudeTotalLines] = useState(0);
-  const [claudeNoteInput, setClaudeNoteInput] = useState("");
+  const claudeInputRef = useRef<HTMLTextAreaElement>(null);
   const [isSendingNote, setIsSendingNote] = useState(false);
   const [claudeCopiedToast, setClaudeCopiedToast] = useState(false);
+  const [pendingImage, setPendingImage] = useState<File | null>(null);
+  const [pendingImagePreview, setPendingImagePreview] = useState<string | null>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const voiceRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const voiceBaseTextRef = useRef("");
+  const voiceFinalTranscriptRef = useRef("");
+  const voiceInterimTranscriptRef = useRef("");
+  const voiceShouldListenRef = useRef(false);
   const [questionSelections, setQuestionSelections] = useState<Record<number, Set<string>>>({});
   const [sendingQuestionAnswer, setSendingQuestionAnswer] = useState(false);
   const [answeredQuestionIds, setAnsweredQuestionIds] = useState<Set<string>>(new Set());
+  const [autoAnswerQuestions, setAutoAnswerQuestions] = useState(true);
+  const attemptedAutoAnswerRef = useRef<Set<string>>(new Set());
   const claudeEndRef = useRef<HTMLDivElement>(null);
   const claudeScrollRef = useRef<HTMLDivElement>(null);
   const claudeAutoScrollRef = useRef(true);
   const claudeScrollingRef = useRef(false); // true while programmatic scroll is happening
   const [showJumpButton, setShowJumpButton] = useState(false);
+  const showJumpButtonRef = useRef(false);
+  const claudeScrollRafRef = useRef<number | null>(null);
+  const [renderedMessageCount, setRenderedMessageCount] = useState(MESSAGE_RENDER_BATCH);
 
   // Bug reports state
   const [bugReports, setBugReports] = useState<BugReport[]>([]);
@@ -249,9 +345,26 @@ export default function AdminPage() {
   const [bridgeSelectedProjectDir, setBridgeSelectedProjectDir] = useState<string>("");
   const [bridgeLog, setBridgeLog] = useState<BridgeLogEntry[]>([]);
   const [bridgeStatus, setBridgeStatus] = useState<"waiting" | "active" | "error" | "offline">("waiting");
+  const bridgeStatusRef = useRef<"waiting" | "active" | "error" | "offline">("waiting");
+  bridgeStatusRef.current = bridgeStatus;
   const [bridgeSendText, setBridgeSendText] = useState("");
   const [bridgeSending, setBridgeSending] = useState(false);
   const [bridgeSendResult, setBridgeSendResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [bridgeSelectionError, setBridgeSelectionError] = useState<string>("");
+  const [bridgeStatusReason, setBridgeStatusReason] = useState<string>("No target selected");
+  const [bridgeStatusUpdatedAt, setBridgeStatusUpdatedAt] = useState<string>("");
+  const [bridgeErrorDetail, setBridgeErrorDetail] = useState<string>("");
+  const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth | null>(null);
+
+  // Monitor targets (view-only windows like Codex)
+  interface MonitorTarget { hwnd: string; pid: string; title: string; label: string; projectDir: string | null; }
+  const [monitorTargets, setMonitorTargets] = useState<MonitorTarget[]>([]);
+  const [monitorOutputs, setMonitorOutputs] = useState<Record<string, { text: string; prevText: string; label: string; lastUpdate: number }>>({});
+  const monitorLastReadRef = useRef<Record<string, string>>({});
+  const monitorTargetsRef = useRef<MonitorTarget[]>([]);
+  monitorTargetsRef.current = monitorTargets;
+  const [pageVisible, setPageVisible] = useState(true);
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
 
   // Treasury state
   const [treasuryData, setTreasuryData] = useState<TreasuryData | null>(null);
@@ -302,12 +415,33 @@ export default function AdminPage() {
   const ttsUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const ttsAutoReadLastIdRef = useRef<string | null>(null);
   const ttsCurrentTextRef = useRef<{ msgId: string; text: string } | null>(null);
+  const ttsAutoReadRef = useRef(false);
+  ttsAutoReadRef.current = ttsAutoRead;
 
   // Session panel enhancements
   const [claudeSearch, setClaudeSearch] = useState("");
   const [sessionExpanded, setSessionExpanded] = useState(false);
   const [collapsedThinking, setCollapsedThinking] = useState<Set<string>>(new Set());
+  const [sessionCompactMode, setSessionCompactMode] = useState(false);
+  const [sessionControlsCollapsed, setSessionControlsCollapsed] = useState(true);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const sessionSheetStartYRef = useRef<number | null>(null);
+  const [expandedMessageIds, setExpandedMessageIds] = useState<Set<string>>(new Set());
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
+  const filteredClaudeMessages = useMemo(() => {
+    const searchLower = claudeSearch.toLowerCase();
+    if (!claudeSearch) return claudeMessages;
+    return claudeMessages.filter((m) =>
+      m.content?.toLowerCase().includes(searchLower) ||
+      m.thinking?.toLowerCase().includes(searchLower) ||
+      m.adminFrom?.toLowerCase().includes(searchLower)
+    );
+  }, [claudeMessages, claudeSearch]);
+  const shouldWindowMessages = !claudeSearch;
+  const visibleClaudeMessages = shouldWindowMessages
+    ? filteredClaudeMessages.slice(-renderedMessageCount)
+    : filteredClaudeMessages;
+  const hiddenMessageCount = Math.max(0, filteredClaudeMessages.length - visibleClaudeMessages.length);
 
   // Load available voices and pick the best natural-sounding one
   useEffect(() => {
@@ -342,41 +476,91 @@ export default function AdminPage() {
     return ttsAvailableVoices.find((v) => v.name === ttsVoiceName) || null;
   }, [ttsVoiceName, ttsAvailableVoices]);
 
-  const ttsSpeak = useCallback((msgId: string, text: string) => {
-    // Detach old utterance callbacks so cancel() doesn't clear new state
-    if (ttsUtteranceRef.current) {
-      ttsUtteranceRef.current.onend = null;
-      ttsUtteranceRef.current.onerror = null;
-    }
-    window.speechSynthesis.cancel();
-    if (ttsPlayingId === msgId) {
+  // TTS queue: messages wait until current speech finishes
+  const ttsQueueRef = useRef<{ msgId: string; text: string }[]>([]);
+  const ttsIsSpeakingRef = useRef(false);
+
+  const ttsPlayNext = useCallback(() => {
+    if (ttsQueueRef.current.length === 0) {
+      ttsIsSpeakingRef.current = false;
       setTtsPlayingId(null);
       ttsCurrentTextRef.current = null;
       ttsUtteranceRef.current = null;
       return;
     }
+    const next = ttsQueueRef.current.shift()!;
+    ttsIsSpeakingRef.current = true;
+    const utterance = new SpeechSynthesisUtterance(next.text);
+    utterance.rate = ttsSpeed;
+    utterance.pitch = 1;
+    const voice = getSelectedVoice();
+    if (voice) utterance.voice = voice;
+    utterance.onend = () => { ttsPlayNext(); };
+    utterance.onerror = () => { ttsPlayNext(); };
+    ttsUtteranceRef.current = utterance;
+    ttsCurrentTextRef.current = next;
+    setTtsPlayingId(next.msgId);
+    window.speechSynthesis.speak(utterance);
+  }, [ttsSpeed, getSelectedVoice]);
+
+  const ttsSpeak = useCallback((msgId: string, text: string) => {
+    // Toggle off if same message clicked while playing
+    if (ttsPlayingId === msgId && ttsIsSpeakingRef.current) {
+      ttsQueueRef.current = [];
+      if (ttsUtteranceRef.current) {
+        ttsUtteranceRef.current.onend = null;
+        ttsUtteranceRef.current.onerror = null;
+      }
+      window.speechSynthesis.cancel();
+      ttsIsSpeakingRef.current = false;
+      setTtsPlayingId(null);
+      ttsCurrentTextRef.current = null;
+      ttsUtteranceRef.current = null;
+      return;
+    }
+    // If already speaking, queue it — don't interrupt
+    if (ttsIsSpeakingRef.current) {
+      // Don't queue duplicates
+      if (!ttsQueueRef.current.find(q => q.msgId === msgId)) {
+        ttsQueueRef.current.push({ msgId, text });
+      }
+      return;
+    }
+    // Nothing playing — start immediately
+    ttsQueueRef.current = [];
+    ttsIsSpeakingRef.current = true;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = ttsSpeed;
     utterance.pitch = 1;
     const voice = getSelectedVoice();
     if (voice) utterance.voice = voice;
-    utterance.onend = () => { if (ttsUtteranceRef.current === utterance) { setTtsPlayingId(null); ttsCurrentTextRef.current = null; } };
-    utterance.onerror = () => { if (ttsUtteranceRef.current === utterance) { setTtsPlayingId(null); ttsCurrentTextRef.current = null; } };
+    utterance.onend = () => { ttsPlayNext(); };
+    utterance.onerror = () => { ttsPlayNext(); };
     ttsUtteranceRef.current = utterance;
     ttsCurrentTextRef.current = { msgId, text };
     setTtsPlayingId(msgId);
     window.speechSynthesis.speak(utterance);
-  }, [ttsPlayingId, ttsSpeed, getSelectedVoice]);
+  }, [ttsPlayingId, ttsSpeed, getSelectedVoice, ttsPlayNext]);
+  const ttsSpeakRef = useRef(ttsSpeak);
+  ttsSpeakRef.current = ttsSpeak;
 
   const ttsStop = useCallback(() => {
+    ttsQueueRef.current = [];
     if (ttsUtteranceRef.current) {
       ttsUtteranceRef.current.onend = null;
       ttsUtteranceRef.current.onerror = null;
     }
     window.speechSynthesis.cancel();
+    ttsIsSpeakingRef.current = false;
     setTtsPlayingId(null);
     ttsCurrentTextRef.current = null;
     ttsUtteranceRef.current = null;
+  }, []);
+
+  const getAutoReadText = useCallback((msg: ClaudeMessage): string => {
+    // Only auto-read messages with actual text content — skip tool-use-only / "working" messages
+    if (msg.content && msg.content.trim()) return msg.content.trim();
+    return "";
   }, []);
 
   // When speed or voice changes mid-playback, restart with new settings
@@ -397,8 +581,8 @@ export default function AdminPage() {
       utterance.pitch = 1;
       const voice = getSelectedVoice();
       if (voice) utterance.voice = voice;
-      utterance.onend = () => { if (ttsUtteranceRef.current === utterance) { setTtsPlayingId(null); ttsCurrentTextRef.current = null; } };
-      utterance.onerror = () => { if (ttsUtteranceRef.current === utterance) { setTtsPlayingId(null); ttsCurrentTextRef.current = null; } };
+      utterance.onend = () => { ttsPlayNext(); };
+      utterance.onerror = () => { ttsPlayNext(); };
       ttsUtteranceRef.current = utterance;
       window.speechSynthesis.speak(utterance);
       setTimeout(() => { ttsRestartRef.current = false; }, 100);
@@ -426,6 +610,53 @@ export default function AdminPage() {
     setTimeout(() => setCopiedMsgId(null), 2000);
   }, []);
 
+  const cleanMessageText = useCallback((text: string) => {
+    return text
+      .replace(/\x1b\[[0-9;]*m/g, "")
+      .replace(/\r/g, "")
+      .replace(/[�]+/g, "")
+      .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }, []);
+
+  const compactConversationText = useCallback((text: string) => {
+    const noisyLine = (line: string) =>
+      /^Ran\s+\S+/i.test(line) ||
+      /^[A-Z]:\\/.test(line) ||
+      /^src\//.test(line) ||
+      /^\d+:\s/.test(line) ||
+      /^@@/.test(line) ||
+      line.includes("tools/") ||
+      line.includes("node_modules") ||
+      line.includes("rg -n");
+    const lines = text
+      .split("\n")
+      .map((l) => l.trimEnd())
+      .filter((l) => l.trim())
+      .filter((l) => !noisyLine(l));
+    return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  }, []);
+
+  const getDisplayMessageText = useCallback((msg: ClaudeMessage) => {
+    const cleaned = cleanMessageText(msg.content || "");
+    const compacted = sessionCompactMode ? compactConversationText(cleaned) : cleaned;
+    const finalText = compacted || cleaned;
+    if (!sessionCompactMode) return { text: cleaned, truncated: false };
+    if (finalText.length <= 520) return { text: finalText, truncated: false };
+    if (expandedMessageIds.has(msg.id)) return { text: finalText, truncated: false };
+    return { text: `${finalText.slice(0, 520).trimEnd()}\n\n[message truncated]`, truncated: true };
+  }, [cleanMessageText, compactConversationText, sessionCompactMode, expandedMessageIds]);
+
+  const toggleMessageExpand = useCallback((msgId: string) => {
+    setExpandedMessageIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(msgId)) next.delete(msgId);
+      else next.add(msgId);
+      return next;
+    });
+  }, []);
+
   // Toggle thinking block collapse
   const toggleThinking = useCallback((msgId: string) => {
     setCollapsedThinking((prev) => {
@@ -436,19 +667,180 @@ export default function AdminPage() {
     });
   }, []);
 
+  const commitVoiceText = useCallback((includeInterim: boolean) => {
+    const spoken = [voiceFinalTranscriptRef.current, includeInterim ? voiceInterimTranscriptRef.current : ""]
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!spoken || !claudeInputRef.current) return;
+
+    const base = voiceBaseTextRef.current.trim();
+    const merged = [base, spoken].filter(Boolean).join(base && spoken ? " " : "");
+    claudeInputRef.current.value = merged;
+    claudeInputRef.current.style.height = "auto";
+    claudeInputRef.current.style.height = `${Math.min(claudeInputRef.current.scrollHeight, 120)}px`;
+
+    voiceBaseTextRef.current = merged;
+    voiceFinalTranscriptRef.current = "";
+    voiceInterimTranscriptRef.current = "";
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const w = window as Window & {
+      SpeechRecognition?: BrowserSpeechRecognitionCtor;
+      webkitSpeechRecognition?: BrowserSpeechRecognitionCtor;
+    };
+    const RecognitionCtor = w.SpeechRecognition || w.webkitSpeechRecognition;
+    if (!RecognitionCtor) {
+      setVoiceSupported(false);
+      return;
+    }
+
+    setVoiceSupported(true);
+    const recognition = new RecognitionCtor();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onstart = () => {
+      setVoiceListening(true);
+      setVoiceError("");
+    };
+    recognition.onend = () => {
+      if (voiceShouldListenRef.current) {
+        // Browser engines may end recognition after a short pause; resume automatically.
+        try { recognition.start(); } catch {}
+        return;
+      }
+      setVoiceListening(false);
+      commitVoiceText(true);
+    };
+    recognition.onerror = (event) => {
+      if (voiceShouldListenRef.current) {
+        // Non-fatal while recording; engine can recover on next onend/start cycle.
+        setVoiceError(event.error || "Voice input hiccup");
+        return;
+      }
+      setVoiceListening(false);
+      setVoiceError(event.error || "Voice input failed");
+    };
+    recognition.onresult = (event) => {
+      const finalParts: string[] = [];
+      const interimParts: string[] = [];
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i];
+        const chunk = result?.[0]?.transcript?.trim();
+        if (!chunk) continue;
+        if (result.isFinal) {
+          finalParts.push(chunk);
+        } else {
+          interimParts.push(chunk);
+        }
+      }
+      voiceFinalTranscriptRef.current = finalParts.join(" ").replace(/\s+/g, " ").trim();
+      voiceInterimTranscriptRef.current = interimParts.join(" ").replace(/\s+/g, " ").trim();
+
+      // Live preview while recording so user can see text immediately.
+      const liveSpoken = [voiceFinalTranscriptRef.current, voiceInterimTranscriptRef.current]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      const base = voiceBaseTextRef.current.trim();
+      const merged = [base, liveSpoken].filter(Boolean).join(base && liveSpoken ? " " : "");
+      if (claudeInputRef.current) {
+        claudeInputRef.current.value = merged;
+        claudeInputRef.current.style.height = "auto";
+        claudeInputRef.current.style.height = `${Math.min(claudeInputRef.current.scrollHeight, 120)}px`;
+      }
+    };
+
+    voiceRecognitionRef.current = recognition;
+    return () => {
+      voiceShouldListenRef.current = false;
+      try { recognition.stop(); } catch {}
+      recognition.onstart = null;
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      voiceRecognitionRef.current = null;
+    };
+  }, [commitVoiceText]);
+
+  const toggleVoiceInput = useCallback(() => {
+    const recognition = voiceRecognitionRef.current;
+    if (!recognition) return;
+    if (voiceListening || voiceShouldListenRef.current) {
+      voiceShouldListenRef.current = false;
+      commitVoiceText(true);
+      try { recognition.stop(); } catch {}
+      return;
+    }
+    setVoiceError("");
+    voiceBaseTextRef.current = claudeInputRef.current?.value || "";
+    voiceFinalTranscriptRef.current = "";
+    voiceInterimTranscriptRef.current = "";
+    voiceShouldListenRef.current = true;
+    try {
+      recognition.start();
+    } catch {
+      voiceShouldListenRef.current = false;
+      setVoiceListening(false);
+      setVoiceError("Unable to start microphone");
+    }
+  }, [voiceListening, commitVoiceText]);
+
   type AdminTab = "overview" | "users" | "alerts" | "session" | "bugs" | "bridge" | "treasury" | "ads";
   const validTabs: AdminTab[] = ["overview", "users", "alerts", "session", "bugs", "bridge", "treasury", "ads"];
+  const mobileTabOrder = useMemo<AdminTab[]>(
+    () => ["session", "bridge", "bugs", "overview", "users", "alerts", "treasury", "ads"],
+    [],
+  );
+  const tabSwipeStartRef = useRef<{ x: number; y: number } | null>(null);
   const [activeTab, setActiveTabRaw] = useState<AdminTab>(() => {
     if (typeof window !== "undefined") {
       const saved = sessionStorage.getItem("admin-active-tab") as AdminTab | null;
       if (saved && validTabs.includes(saved)) return saved;
+      if (window.innerWidth < 1024) return "session";
     }
     return "overview";
   });
   const setActiveTab = useCallback((tab: AdminTab) => {
     setActiveTabRaw(tab);
+    setSessionMenuOpen(false);
+    if (tab === "session") {
+      setRenderedMessageCount(MESSAGE_RENDER_BATCH);
+      setSessionControlsCollapsed(true);
+      setSessionCompactMode(false);
+    }
     try { sessionStorage.setItem("admin-active-tab", tab); } catch {}
   }, []);
+  const handlePanelTouchStart = useCallback((e: TouchEvent<HTMLDivElement>) => {
+    if (typeof window !== "undefined" && window.innerWidth >= 1024) return;
+    const target = e.target as HTMLElement;
+    if (target.closest("button, a, input, textarea, select, [data-no-swipe='true']")) return;
+    const t = e.touches[0];
+    tabSwipeStartRef.current = { x: t.clientX, y: t.clientY };
+  }, []);
+  const handlePanelTouchEnd = useCallback((e: TouchEvent<HTMLDivElement>) => {
+    if ((typeof window !== "undefined" && window.innerWidth >= 1024) || sessionMenuOpen) return;
+    const start = tabSwipeStartRef.current;
+    tabSwipeStartRef.current = null;
+    if (!start) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    if (Math.abs(dx) < 70 || Math.abs(dy) > 45) return;
+    const idx = mobileTabOrder.indexOf(activeTab);
+    if (idx < 0) return;
+    if (dx < 0 && idx < mobileTabOrder.length - 1) {
+      setActiveTab(mobileTabOrder[idx + 1]);
+    } else if (dx > 0 && idx > 0) {
+      setActiveTab(mobileTabOrder[idx - 1]);
+    }
+  }, [activeTab, mobileTabOrder, sessionMenuOpen, setActiveTab]);
   const fetchStats = useCallback(async () => {
     try {
       const res = await fetch("/api/admin");
@@ -580,17 +972,42 @@ export default function AdminPage() {
   const fetchClaudeSession = useCallback(async () => {
     try {
       const params = new URLSearchParams();
+      params.set("exact", "1");
       if (bridgeSelectedProjectDir) params.set("projectDir", bridgeSelectedProjectDir);
       const res = await fetch(`/api/admin/claude-session${params.toString() ? `?${params}` : ""}`);
       if (res.ok) {
         const data = await res.json();
-        if (data.messages) setClaudeMessages(data.messages);
-        if (data.sessionFile) setClaudeSessionFile(data.sessionFile);
-        if (data.totalLines) setClaudeTotalLines(data.totalLines);
+        if (data.messages) {
+          const incoming = data.messages as ClaudeMessage[];
+          setClaudeMessages((prev) => {
+            const prevLast = prev[prev.length - 1];
+            const nextLast = incoming[incoming.length - 1];
+            const unchanged =
+              prev.length === incoming.length &&
+              prevLast?.id === nextLast?.id &&
+              prevLast?.timestamp === nextLast?.timestamp;
+            return unchanged ? prev : incoming;
+          });
+        }
+        if (typeof data.sessionFile === "string") {
+          setClaudeSessionFile((prev) => (prev === data.sessionFile ? prev : data.sessionFile));
+        }
+        if (typeof data.totalLines === "number") {
+          setClaudeTotalLines((prev) => (prev === data.totalLines ? prev : data.totalLines));
+        }
       }
     } catch {
       // Silently fail - session might not be active
     }
+  }, [bridgeSelectedProjectDir]);
+
+  const clearClaudeSession = useCallback(async () => {
+    try {
+      const params = new URLSearchParams();
+      if (bridgeSelectedProjectDir) params.set("projectDir", bridgeSelectedProjectDir);
+      await fetch(`/api/admin/claude-session${params.toString() ? `?${params}` : ""}`, { method: "DELETE", credentials: "include" });
+      setClaudeMessages([]);
+    } catch {}
   }, [bridgeSelectedProjectDir]);
 
   const fetchBugs = useCallback(async () => {
@@ -613,18 +1030,37 @@ export default function AdminPage() {
       }
       const data = await res.json();
       setBridgeWindows(data);
-      // Fetch thumbnails for all windows
+      // Bridge responded OK — clear offline status if it was set
+      if (bridgeStatusRef.current === "offline") {
+        setBridgeStatus("waiting");
+        setBridgeStatusReason("Bridge reconnected");
+        setBridgeErrorDetail("");
+      }
+      // Prune stale thumbnails for windows that no longer exist
+      const activeHwnds = new Set(data.map((w: BridgeWindow) => w.hwnd));
+      setBridgeThumbnails((prev) => {
+        const pruned: Record<string, string> = {};
+        for (const hwnd of Object.keys(prev)) {
+          if (activeHwnds.has(hwnd)) pruned[hwnd] = prev[hwnd];
+        }
+        return pruned;
+      });
+      // Fetch thumbnails for all windows (separate try-catch so failure doesn't mark bridge offline)
       if (data.length > 0) {
-        const thumbRes = await fetch("/api/admin/bridge/thumbnails", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ hwnds: data.map((w: BridgeWindow) => w.hwnd) }),
-        });
-        if (thumbRes.ok) {
-          const thumbData = await thumbRes.json();
-          if (thumbData.thumbnails) {
-            setBridgeThumbnails((prev) => ({ ...prev, ...thumbData.thumbnails }));
+        try {
+          const thumbRes = await fetch("/api/admin/bridge/thumbnails", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ hwnds: data.map((w: BridgeWindow) => w.hwnd) }),
+          });
+          if (thumbRes.ok) {
+            const thumbData = await thumbRes.json();
+            if (thumbData.thumbnails) {
+              setBridgeThumbnails((prev) => ({ ...prev, ...thumbData.thumbnails }));
+            }
           }
+        } catch {
+          // Thumbnail fetch failed — bridge is still online, just skip thumbnails
         }
       }
     } catch {
@@ -632,30 +1068,71 @@ export default function AdminPage() {
     }
   }, []);
 
+  const refreshSessionData = useCallback(() => {
+    fetchClaudeSession();
+    fetchBridgeWindows();
+  }, [fetchClaudeSession, fetchBridgeWindows]);
+
   const fetchBridgeLog = useCallback(async () => {
     try {
       const res = await fetch("/api/admin/bridge/log");
       if (!res.ok) {
-        if (res.status === 502) setBridgeStatus("offline");
+        if (res.status === 502) {
+          setBridgeStatus("offline");
+          try {
+            const errData = await res.json() as BridgeLogPayload;
+            setBridgeStatusReason(errData.statusReason || "Bridge unavailable");
+            setBridgeErrorDetail(errData.error || errData.statusReason || "Bridge unavailable");
+            setBridgeStatusUpdatedAt(new Date().toISOString());
+          } catch {
+            setBridgeStatusReason("Bridge unavailable");
+            setBridgeErrorDetail("Bridge unavailable");
+            setBridgeStatusUpdatedAt(new Date().toISOString());
+          }
+        }
         return;
       }
-      const data = await res.json();
+      const data = await res.json() as BridgeLogPayload;
       setBridgeLog(data.log || []);
+      setBridgeErrorDetail("");
+      if (data.statusReason) setBridgeStatusReason(data.statusReason);
+      if (data.statusUpdatedAt) setBridgeStatusUpdatedAt(data.statusUpdatedAt);
       if (data.selectedHwnd) {
         setBridgeSelectedHwnd(data.selectedHwnd);
         setBridgeSelectedLabel(data.selectedLabel || data.selectedTitle || "");
-        if (data.selectedProjectDir) setBridgeSelectedProjectDir(data.selectedProjectDir);
+        setBridgeSelectedProjectDir(data.selectedProjectDir || "");
+        if (!data.selectedProjectDir) {
+          setBridgeSelectionError("Selected window has no Claude project path. Session detection will use fallback.");
+          setBridgeStatusReason("No project path from bridge target");
+        } else {
+          setBridgeSelectionError("");
+        }
         setBridgeStatus(data.status === "error" ? "error" : "active");
       } else {
-        if (bridgeStatus !== "offline") setBridgeStatus("waiting");
+        setBridgeStatus("waiting");
         setBridgeSelectedHwnd(null);
+        if (!data.statusReason) setBridgeStatusReason("No target selected");
       }
+      if (data.monitorTargets) setMonitorTargets(data.monitorTargets);
     } catch {
       setBridgeStatus("offline");
+      setBridgeStatusReason("Bridge unavailable");
+      setBridgeErrorDetail("Network error while reading bridge log");
+      setBridgeStatusUpdatedAt(new Date().toISOString());
     }
-  }, [bridgeStatus]);
+  }, []); // stable — reads bridgeStatus via ref
+
+  const fetchRuntimeHealth = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/services/status");
+      if (!res.ok) return;
+      const data = await res.json();
+      setRuntimeHealth(data);
+    } catch {}
+  }, []);
 
   const bridgeSelectWindow = async (w: BridgeWindow) => {
+    if (w.hwnd === bridgeSelectedHwnd) return; // Already selected
     try {
       const res = await fetch("/api/admin/bridge/select", {
         method: "POST",
@@ -666,7 +1143,11 @@ export default function AdminPage() {
         setBridgeSelectedHwnd(w.hwnd);
         setBridgeSelectedLabel(w.label);
         setBridgeSelectedProjectDir(w.projectDir || "");
+        setBridgeSelectionError("");
         setBridgeStatus("active");
+        setBridgeStatusReason(`Connected to ${w.label || w.title}`);
+        setBridgeStatusUpdatedAt(new Date().toISOString());
+        setBridgeErrorDetail("");
         // Clear old session data and refresh for the new target
         setClaudeMessages([]);
         setClaudeSessionFile("");
@@ -682,6 +1163,36 @@ export default function AdminPage() {
       setBridgeSelectedLabel("");
       setBridgeSelectedProjectDir("");
       setBridgeStatus("waiting");
+      setBridgeStatusReason("Disconnected by admin");
+      setBridgeStatusUpdatedAt(new Date().toISOString());
+    } catch {}
+  };
+
+  const bridgeMonitorWindow = async (w: BridgeWindow) => {
+    try {
+      const res = await fetch("/api/admin/bridge/monitor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hwnd: w.hwnd, pid: w.pid, title: w.title, label: w.label, projectDir: w.projectDir }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.monitors) setMonitorTargets(data.monitors);
+      }
+    } catch {}
+  };
+
+  const bridgeUnmonitorWindow = async (hwnd: string) => {
+    try {
+      const res = await fetch("/api/admin/bridge/unmonitor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hwnd }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.monitors) setMonitorTargets(data.monitors);
+      }
     } catch {}
   };
 
@@ -774,7 +1285,7 @@ export default function AdminPage() {
     return () => clearInterval(interval);
   }, [deviceRequestId, deviceRequestStatus, fetchDeviceInfo]);
 
-  const [launchDir, setLaunchDir] = useState("C:\\Users\\Richard\\Desktop\\Rally Live");
+  const [launchDir, setLaunchDir] = useState("C:\\Users\\Richard\\Desktop\\RallyLive.ca\\rally-live");
   const [showLaunchInput, setShowLaunchInput] = useState(false);
 
   const launchClaude = async (workDir?: string) => {
@@ -862,13 +1373,18 @@ export default function AdminPage() {
     setSavingBugNote(false);
   };
 
-  const sendQuestionAnswer = async (msgId: string, questions: ClaudeQuestion[]) => {
+  const sendQuestionAnswer = useCallback(async (
+    msgId: string,
+    questions: ClaudeQuestion[],
+    forcedSelections?: Record<number, Set<string>>
+  ) => {
     setSendingQuestionAnswer(true);
     try {
       // Build answer text from selections
       const answerParts: string[] = [];
+      const sourceSelections = forcedSelections || questionSelections;
       for (let qi = 0; qi < questions.length; qi++) {
-        const selected = questionSelections[qi];
+        const selected = sourceSelections[qi];
         if (!selected || selected.size === 0) continue;
         const labels = Array.from(selected);
         if (questions.length > 1) {
@@ -898,7 +1414,7 @@ export default function AdminPage() {
       setTimeout(() => setClaudeCopiedToast(false), 5000);
     } catch {}
     setSendingQuestionAnswer(false);
-  };
+  }, [questionSelections, bridgeSelectedProjectDir, bridgeSelectedHwnd, fetchClaudeSession]);
 
   // Parse Claude session messages for bug report responses — matches on [BUG-RESPONSE:id]
   const parseBugResponses = useCallback(async (messages: ClaudeMessage[]) => {
@@ -960,13 +1476,14 @@ export default function AdminPage() {
     }
   }, [bugReports, fetchBugs]);
 
-  // Poll Claude session every 2 seconds
+  // Poll Claude session only when needed and visible.
   useEffect(() => {
-    if (!isLoggedIn || !currentUser?.isOwner) return;
+    if (!isLoggedIn || !currentUser?.isOwner || !pageVisible) return;
+    if (activeTab !== "session" && activeTab !== "bugs") return;
     fetchClaudeSession();
-    const interval = setInterval(fetchClaudeSession, 2000);
+    const interval = setInterval(fetchClaudeSession, 3000);
     return () => clearInterval(interval);
-  }, [isLoggedIn, currentUser?.isOwner, fetchClaudeSession]);
+  }, [isLoggedIn, currentUser?.isOwner, fetchClaudeSession, pageVisible, activeTab]);
 
   // Parse Claude responses for bug report pipeline
   useEffect(() => {
@@ -979,12 +1496,32 @@ export default function AdminPage() {
   useEffect(() => {
     if (!ttsAutoRead || claudeMessages.length === 0) return;
     const lastMsg = claudeMessages[claudeMessages.length - 1];
-    if (lastMsg.role === "assistant" && lastMsg.content && lastMsg.id !== ttsAutoReadLastIdRef.current) {
+    const autoText = lastMsg.role === "assistant" ? getAutoReadText(lastMsg) : "";
+    if (lastMsg.role === "assistant" && autoText && lastMsg.id !== ttsAutoReadLastIdRef.current) {
       ttsAutoReadLastIdRef.current = lastMsg.id;
       // Small delay to let UI settle
-      setTimeout(() => ttsSpeak(lastMsg.id, lastMsg.content), 300);
+      setTimeout(() => ttsSpeak(lastMsg.id, autoText), 300);
     }
-  }, [claudeMessages, ttsAutoRead, ttsSpeak]);
+  }, [claudeMessages, ttsAutoRead, ttsSpeak, getAutoReadText]);
+
+  // Auto-answer Claude questions so hidden prompts do not stall progress
+  useEffect(() => {
+    if (!autoAnswerQuestions || sendingQuestionAnswer) return;
+    const pending = [...claudeMessages]
+      .reverse()
+      .find((m) => m.pendingQuestions && m.pendingQuestions.length > 0 && !answeredQuestionIds.has(m.id));
+    if (!pending || !pending.pendingQuestions || attemptedAutoAnswerRef.current.has(pending.id)) return;
+
+    const autoSelections: Record<number, Set<string>> = {};
+    pending.pendingQuestions.forEach((q, qi) => {
+      const first = q.options?.[0]?.label;
+      if (first) autoSelections[qi] = new Set([first]);
+    });
+    if (Object.keys(autoSelections).length === 0) return;
+
+    attemptedAutoAnswerRef.current.add(pending.id);
+    sendQuestionAnswer(pending.id, pending.pendingQuestions, autoSelections);
+  }, [autoAnswerQuestions, sendingQuestionAnswer, claudeMessages, answeredQuestionIds, sendQuestionAnswer]);
 
   // Track the previous message count to detect genuinely new messages
   const prevMsgCountRef = useRef(0);
@@ -1005,30 +1542,40 @@ export default function AdminPage() {
   }, [claudeMessages]);
 
   // Detect if user scrolled away from bottom — ignore programmatic scrolls
+  const setJumpButtonVisible = useCallback((visible: boolean) => {
+    if (showJumpButtonRef.current === visible) return;
+    showJumpButtonRef.current = visible;
+    setShowJumpButton(visible);
+  }, []);
+
   const handleClaudeScroll = useCallback(() => {
     if (claudeScrollingRef.current) return;
-    const el = claudeScrollRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    claudeAutoScrollRef.current = atBottom;
-    setShowJumpButton(!atBottom);
-  }, []);
+    if (claudeScrollRafRef.current !== null) return;
+    claudeScrollRafRef.current = window.requestAnimationFrame(() => {
+      claudeScrollRafRef.current = null;
+      const el = claudeScrollRef.current;
+      if (!el) return;
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+      claudeAutoScrollRef.current = atBottom;
+      setJumpButtonVisible(!atBottom);
+    });
+  }, [setJumpButtonVisible]);
 
   // User manually touched / started scrolling — immediately disable auto-scroll
   const handleClaudeTouchStart = useCallback(() => {
     claudeAutoScrollRef.current = false;
-    setShowJumpButton(true);
-  }, []);
+    setJumpButtonVisible(true);
+  }, [setJumpButtonVisible]);
 
   const scrollToBottom = useCallback(() => {
     if (claudeEndRef.current) {
       claudeScrollingRef.current = true;
       claudeEndRef.current.scrollIntoView({ behavior: "smooth" });
       claudeAutoScrollRef.current = true;
-      setShowJumpButton(false);
+      setJumpButtonVisible(false);
       setTimeout(() => { claudeScrollingRef.current = false; }, 500);
     }
-  }, []);
+  }, [setJumpButtonVisible]);
 
   useEffect(() => {
     if (!isLoading && (!isLoggedIn || !currentUser?.isOwner)) {
@@ -1042,16 +1589,17 @@ export default function AdminPage() {
     }
   }, [isLoading, isLoggedIn, currentUser, router, fetchStats, fetchUsers, fetchBugs]);
 
-  // Auto-refresh stats, users, and alerts every 2 seconds
+  // Auto-refresh heavy datasets except while focused on real-time session/bridge tabs.
   useEffect(() => {
-    if (!isLoggedIn || !currentUser?.isOwner) return;
+    if (!isLoggedIn || !currentUser?.isOwner || !pageVisible) return;
+    if (activeTab === "session" || activeTab === "bridge") return;
     const interval = setInterval(() => {
       fetchStats();
       fetchUsers();
       fetchBugs();
     }, 5000);
     return () => clearInterval(interval);
-  }, [isLoggedIn, currentUser?.isOwner, fetchStats, fetchUsers, fetchBugs]);
+  }, [isLoggedIn, currentUser?.isOwner, fetchStats, fetchUsers, fetchBugs, pageVisible, activeTab]);
 
   // Bridge polling — full polling on bridge tab, log-only on session tab (for bridge indicator)
   useEffect(() => {
@@ -1059,18 +1607,120 @@ export default function AdminPage() {
     if (activeTab === "bridge") {
       fetchBridgeWindows();
       fetchBridgeLog();
+      fetchRuntimeHealth();
       fetchDeviceInfo();
       const windowsInterval = setInterval(fetchBridgeWindows, 15000);
       const logInterval = setInterval(fetchBridgeLog, 3000);
+      const runtimeInterval = setInterval(fetchRuntimeHealth, 10000);
       const deviceInterval = setInterval(fetchDeviceInfo, 5000);
-      return () => { clearInterval(windowsInterval); clearInterval(logInterval); clearInterval(deviceInterval); };
+      return () => { clearInterval(windowsInterval); clearInterval(logInterval); clearInterval(runtimeInterval); clearInterval(deviceInterval); };
     }
     if (activeTab === "session") {
       fetchBridgeLog(); // Check bridge status once on tab switch
+      fetchRuntimeHealth();
       const logInterval = setInterval(fetchBridgeLog, 5000);
-      return () => clearInterval(logInterval);
+      const runtimeInterval = setInterval(fetchRuntimeHealth, 10000);
+      // Refresh monitored window thumbnails on session tab too
+      const monitorThumbInterval = setInterval(async () => {
+        if (monitorTargetsRef.current.length === 0) return;
+        try {
+          const hwnds = monitorTargetsRef.current.map(m => m.hwnd);
+          const thumbRes = await fetch("/api/admin/bridge/thumbnails", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ hwnds }),
+          });
+          if (thumbRes.ok) {
+            const thumbData = await thumbRes.json();
+            if (thumbData.thumbnails) {
+              setBridgeThumbnails((prev) => ({ ...prev, ...thumbData.thumbnails }));
+            }
+          }
+        } catch {}
+      }, 10000);
+      // Poll monitor console output for TTS
+      const monitorOutputInterval = setInterval(async () => {
+        if (monitorTargetsRef.current.length === 0) return;
+        try {
+          const res = await fetch("/api/admin/bridge/monitor-output");
+          if (res.ok) {
+            const data = await res.json();
+            if (data.outputs) {
+              setMonitorOutputs(data.outputs);
+              // Auto-read new text from monitored windows
+              if (ttsAutoReadRef.current) {
+                for (const [hwnd, buf] of Object.entries(data.outputs) as [string, { text: string; prevText: string; label: string }][]) {
+                  const lastRead = monitorLastReadRef.current[hwnd] || "";
+                  if (buf.text && buf.text !== lastRead && buf.text !== buf.prevText) {
+                    // Find new lines that weren't in the previous read
+                    const prevLines = (lastRead || "").split("\n");
+                    const curLines = buf.text.split("\n").filter((l: string) => l.trim());
+                    const newLines = curLines.filter((l: string) => !prevLines.includes(l) && l.trim().length > 3);
+                    if (newLines.length > 0) {
+                      const newText = newLines.slice(-5).join(". "); // Read last 5 new lines max
+                      if (newText.length > 10) {
+                        ttsSpeakRef.current(`monitor-${hwnd}-${Date.now()}`, newText);
+                      }
+                    }
+                    monitorLastReadRef.current[hwnd] = buf.text;
+                  }
+                }
+              }
+            }
+          }
+        } catch {}
+      }, 10000);
+      return () => { clearInterval(logInterval); clearInterval(runtimeInterval); clearInterval(monitorThumbInterval); clearInterval(monitorOutputInterval); };
     }
-  }, [isLoggedIn, currentUser?.isOwner, activeTab, fetchBridgeWindows, fetchBridgeLog]);
+  }, [isLoggedIn, currentUser?.isOwner, activeTab, fetchBridgeWindows, fetchBridgeLog, fetchRuntimeHealth, fetchDeviceInfo]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => setPageVisible(document.visibilityState === "visible");
+    onVisibilityChange();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (claudeScrollRafRef.current !== null) {
+        window.cancelAnimationFrame(claudeScrollRafRef.current);
+        claudeScrollRafRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1023px)");
+    const coarse = window.matchMedia("(hover: none) and (pointer: coarse)");
+    const syncViewport = () => setIsMobileViewport(media.matches || coarse.matches || window.innerWidth < 1024);
+    syncViewport();
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", syncViewport);
+      if (typeof coarse.addEventListener === "function") {
+        coarse.addEventListener("change", syncViewport);
+      }
+      window.addEventListener("resize", syncViewport);
+      return () => {
+        media.removeEventListener("change", syncViewport);
+        if (typeof coarse.removeEventListener === "function") {
+          coarse.removeEventListener("change", syncViewport);
+        }
+        window.removeEventListener("resize", syncViewport);
+      };
+    }
+    media.onchange = syncViewport;
+    coarse.onchange = syncViewport;
+    window.addEventListener("resize", syncViewport);
+    return () => {
+      media.onchange = null;
+      coarse.onchange = null;
+      window.removeEventListener("resize", syncViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMobileViewport) {
+      setSessionMenuOpen(false);
+    }
+  }, [isMobileViewport]);
 
   // Fetch device info on mount
   useEffect(() => {
@@ -1415,6 +2065,7 @@ export default function AdminPage() {
   }
 
   const openBugCount = bugReports.filter((b) => !["RESOLVED", "DISMISSED"].includes(b.status)).length;
+  const isMobileSessionFocus = isMobileViewport && activeTab === "session";
 
   const tabs = [
     { id: "session" as const, label: "Claude Session", icon: Eye },
@@ -1428,38 +2079,68 @@ export default function AdminPage() {
   ];
 
   return (
-    <div className="min-h-screen p-4 md:p-6 lg:p-8">
+    <div
+      className={`admin-mobile ${
+        isMobileViewport
+          ? "h-full min-h-0 overflow-hidden p-0 flex flex-col"
+          : activeTab === "session"
+            ? "session-mode h-full min-h-0 overflow-hidden p-2 lg:p-3 flex flex-col"
+            : "min-h-screen p-3 pb-24 lg:p-6"
+      }`}
+      onTouchStart={handlePanelTouchStart}
+      onTouchEnd={handlePanelTouchEnd}
+    >
       {/* Header */}
-      <div className="mb-8 flex items-center gap-4">
-        <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-yellow-500 to-amber-600">
-          <Crown size={24} className="text-white" />
+      <div className="admin-header mb-2 lg:mb-8 hidden lg:flex items-center gap-2 lg:gap-3">
+        <div className="flex h-10 w-10 lg:h-12 lg:w-12 items-center justify-center rounded-xl bg-gradient-to-br from-yellow-500 to-amber-600 shrink-0">
+          <Crown size={22} className="text-white" />
         </div>
-        <div>
-          <h1 className="text-2xl font-bold text-text">Admin Panel</h1>
-          <p className="text-sm text-text-muted">Rally Live Platform Management</p>
+        <div className="min-w-0">
+          <h1 className="text-xl lg:text-2xl font-bold text-text truncate">Admin Panel</h1>
+          <p className="text-sm text-text-muted hidden lg:block">Rally Live Platform Management</p>
         </div>
-        <div className="ml-auto flex items-center gap-2 rounded-lg bg-yellow-500/10 px-3 py-1.5">
+        <button
+          onClick={async () => {
+            // Force clear all service worker caches and reload
+            if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+              navigator.serviceWorker.controller.postMessage("FORCE_REFRESH");
+            }
+            if ("caches" in window) {
+              const keys = await caches.keys();
+              await Promise.all(keys.map((k) => caches.delete(k)));
+            }
+            window.location.reload();
+          }}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-2.5 py-2 text-xs sm:text-sm font-bold text-white hover:bg-cyan-500 transition-colors shrink-0"
+          title="Force update app"
+        >
+          <RotateCcw size={14} />
+          <span className="hidden sm:inline">Update App</span>
+          <span className="sm:hidden">Update</span>
+        </button>
+        <div className="flex items-center gap-1.5 rounded-lg bg-yellow-500/10 px-2.5 py-1.5 shrink-0">
           <Shield size={14} className="text-yellow-500" />
-          <span className="text-xs font-medium text-yellow-500">OWNER ACCESS</span>
+          <span className="text-xs font-medium text-yellow-500">OWNER</span>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="mb-6 flex gap-1 overflow-x-auto rounded-xl bg-bg-surface p-1 border border-border">
+      <div className={`admin-tabs ${activeTab === "session" ? "mb-2 lg:mb-3" : "mb-3 lg:mb-6"} hidden lg:flex gap-1 overflow-x-auto rounded-xl bg-bg-surface p-1 border border-border no-scrollbar`}>
         {tabs.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap ${
+            className={`flex items-center justify-center gap-2 rounded-lg px-3 py-3 lg:px-4 lg:py-2.5 text-sm font-medium transition-all whitespace-nowrap relative ${
               activeTab === tab.id
                 ? "bg-bg-surface2 text-text shadow-sm"
                 : "text-text-muted hover:text-text-secondary"
             }`}
+            title={tab.label}
           >
-            <tab.icon size={16} />
-            {tab.label}
+            <tab.icon size={20} />
+            <span className="tab-label">{tab.label}</span>
             {"badge" in tab && (tab as any).badge > 0 && (
-              <span className={`ml-1 flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-bold text-white ${
+              <span className={`absolute -top-0.5 -right-0.5 lg:static lg:ml-0.5 flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-bold text-white ${
                 tab.id === "alerts" && unreadFraudAlertCount > 0 ? "bg-red-600 animate-pulse" : "bg-red-500"
               }`}>
                 {(tab as any).badge}
@@ -1471,109 +2152,292 @@ export default function AdminPage() {
 
       {/* Claude Session Tab */}
       {activeTab === "session" && (
-        <div className="rounded-xl border border-border bg-[#111114] overflow-hidden flex flex-col" style={{ maxHeight: sessionExpanded ? "90vh" : "65vh" }}>
+        <>
+        <div
+          className={`session-container conversation-shell bg-[#111114] overflow-hidden flex flex-col flex-1 min-h-0 ${isMobileSessionFocus ? "" : "rounded-xl border border-border"}`}
+          style={sessionExpanded ? { height: "92dvh" } : undefined}
+        >
           {/* Session header */}
-          <div className="border-b border-[#2a2a30] bg-[#18181c] px-4 py-2 shrink-0 space-y-2">
-            <div className="flex items-center gap-2">
-              <div className="flex gap-1.5">
+            <div className={`hidden lg:block border-b border-[#2a2a30] bg-[#18181c] px-3 lg:px-4 py-2 shrink-0 ${sessionControlsCollapsed ? "space-y-0" : "space-y-2"}`}>
+            {isMobileSessionFocus && (
+              <div className="flex items-center justify-between py-1.5">
+                <div className="min-w-0">
+                  <p className="text-[15px] font-semibold text-gray-100 leading-none">Admin Panel</p>
+                  <p className="mt-1 text-[11px] text-gray-400 truncate">Claude Session</p>
+                </div>
+                <button
+                  onClick={() => setSessionMenuOpen(true)}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-full text-gray-300 hover:bg-white/10 transition-colors"
+                  title="Open menu"
+                >
+                  <MoreVertical size={20} />
+                </button>
+              </div>
+            )}
+
+            {!isMobileSessionFocus && (
+            <>
+            <div className="session-header-row flex items-center gap-2">
+              <div className="hidden lg:flex gap-1.5">
                 <span className="h-3 w-3 rounded-full bg-[#28c840]" />
                 <span className="h-3 w-3 rounded-full bg-[#28c840]" />
                 <span className="h-3 w-3 rounded-full bg-[#28c840]" />
               </div>
-              <div className="flex-1 text-center">
-                <span className="text-xs text-gray-300 font-mono">
+              {/* Status dots — mobile compact */}
+              <div className="flex items-center gap-1.5 lg:hidden">
+                {bridgeSelectedHwnd ? (
+                  <span className="h-2.5 w-2.5 rounded-full bg-green-500" title="Bridge connected" />
+                ) : (
+                  <span className="h-2.5 w-2.5 rounded-full bg-yellow-500" title="No bridge" />
+                )}
+                <span className="h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse" title="Live" />
+              </div>
+              <div className="flex-1 min-w-0 text-center">
+                <span className="text-sm text-gray-300 font-mono truncate block">
                   {bridgeSelectedLabel
                     ? `Session — ${bridgeSelectedLabel}`
                     : `Session — ${claudeSessionFile || "searching..."}`}
                 </span>
               </div>
-              <div className="flex items-center gap-2">
-                {bridgeSelectedHwnd ? (
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Desktop-only status badges */}
+                <div className="desktop-only flex items-center gap-2">
+                  {bridgeSelectedHwnd ? (
+                    <span className="flex items-center gap-1 text-[10px] text-green-400">
+                      <Monitor size={10} />
+                      BRIDGE
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1 text-[10px] text-yellow-500">
+                      <Monitor size={10} />
+                      NO BRIDGE
+                    </span>
+                  )}
                   <span className="flex items-center gap-1 text-[10px] text-green-400">
-                    <Monitor size={10} />
-                    BRIDGE
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-400" />
+                    LIVE
                   </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-[10px] text-yellow-500">
-                    <Monitor size={10} />
-                    NO BRIDGE
-                  </span>
-                )}
-                <span className="flex items-center gap-1 text-[10px] text-green-400">
-                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-400" />
-                  LIVE
-                </span>
-                <span className="text-[10px] text-gray-400">{claudeTotalLines} entries</span>
+                  {runtimeHealth && (
+                    <span className={`flex items-center gap-1 text-[10px] ${runtimeHealth.ok ? "text-green-400" : "text-yellow-400"}`}>
+                      <span className={`inline-block h-1.5 w-1.5 rounded-full ${runtimeHealth.ok ? "bg-green-400" : "bg-yellow-400"}`} />
+                      {runtimeHealth.ok ? "STACK OK" : "STACK DEGRADED"}
+                    </span>
+                  )}
+                  <span className="text-[10px] text-gray-400">{claudeTotalLines} entries</span>
+                </div>
                 <button
                   onClick={() => setSessionExpanded((p) => !p)}
-                  className="rounded p-1 text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                  className="rounded p-2 text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
                   title={sessionExpanded ? "Collapse panel" : "Expand panel"}
                 >
-                  {sessionExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                  {sessionExpanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+                </button>
+                {ttsPlayingId && (
+                  <button
+                    onClick={ttsStop}
+                    className="rounded px-2 py-1 text-[11px] font-semibold text-red-200 bg-red-600/20 border border-red-500/40 hover:bg-red-600/30 transition-colors"
+                    title="Stop voice playback"
+                  >
+                    <span className="inline-flex items-center gap-1"><VolumeX size={12} /> Stop Voice</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setSessionControlsCollapsed((p) => !p)}
+                  className="lg:hidden rounded p-2 text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                  title={sessionControlsCollapsed ? "Show controls" : "Hide controls"}
+                >
+                  <ChevronDown size={16} className={`transition-transform ${sessionControlsCollapsed ? "" : "rotate-180"}`} />
                 </button>
                 <button
-                  onClick={async () => {
-                    try {
-                      const params = new URLSearchParams();
-                      if (bridgeSelectedProjectDir) params.set("projectDir", bridgeSelectedProjectDir);
-                      await fetch(`/api/admin/claude-session${params.toString() ? `?${params}` : ""}`, { method: "DELETE", credentials: "include" });
-                      setClaudeMessages([]);
-                    } catch {}
-                  }}
-                  className="rounded px-2 py-0.5 text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 hover:bg-red-500/20 transition-colors"
+                  onClick={clearClaudeSession}
+                  className="hidden lg:inline-flex rounded-lg px-3 py-1.5 text-sm text-red-400 bg-red-500/10 border border-red-500/20 hover:bg-red-500/20 transition-colors"
                 >
                   Clear
                 </button>
                 <button
-                  onClick={() => { fetchClaudeSession(); fetchBridgeWindows(); }}
-                  className="rounded px-2 py-0.5 text-[10px] text-purple-400 bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 transition-colors"
+                  onClick={refreshSessionData}
+                  className="hidden lg:inline-flex rounded-lg px-3 py-1.5 text-sm text-purple-400 bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 transition-colors"
                 >
                   Refresh
                 </button>
               </div>
             </div>
 
-            {/* Controls row: search, auto-read, speed */}
-            <div className="flex items-center gap-3">
-              {/* Search */}
-              <div className="relative flex-1 max-w-xs">
+            {/* Controls row: collapsible on mobile */}
+            <div className={`overflow-hidden transition-all duration-200 ease-out ${sessionControlsCollapsed ? "max-h-0 opacity-0 lg:max-h-[200px] lg:opacity-100" : "max-h-[240px] opacity-100 lg:max-h-[200px]"}`}>
+            <div className="controls-row flex flex-nowrap items-center gap-1.5 lg:gap-3">
+              {/* Search — hidden on mobile */}
+              <div className="relative flex-1 min-w-[120px] max-w-xs hidden lg:block">
                 <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
                 <input
                   type="text"
                   value={claudeSearch}
-                  onChange={(e) => setClaudeSearch(e.target.value)}
+                  onChange={(e) => {
+                    setClaudeSearch(e.target.value);
+                    setRenderedMessageCount(MESSAGE_RENDER_BATCH);
+                  }}
                   placeholder="Search messages..."
                   className="w-full bg-[#111114] border border-[#333] rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder:text-gray-500 font-mono focus:outline-none focus:border-purple-500/50"
                 />
                 {claudeSearch && (
-                  <button onClick={() => setClaudeSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white">
+                  <button
+                    onClick={() => {
+                      setClaudeSearch("");
+                      setRenderedMessageCount(MESSAGE_RENDER_BATCH);
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
+                  >
                     <XIcon size={12} />
                   </button>
                 )}
               </div>
 
-              {/* Auto-read toggle */}
               <button
-                onClick={() => { setTtsAutoRead((p) => !p); if (ttsAutoRead) ttsStop(); }}
-                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors border ${
-                  ttsAutoRead
-                    ? "text-green-300 bg-green-600/20 border-green-500/40 hover:bg-green-600/30"
-                    : "text-gray-400 bg-white/5 border-white/10 hover:bg-white/10"
+                onClick={() => setSessionCompactMode((p) => !p)}
+                className={`rounded-lg px-2.5 py-1 text-[11px] lg:px-3 lg:py-1.5 lg:text-xs font-semibold border transition-colors shrink-0 ${
+                  sessionCompactMode
+                    ? "text-cyan-300 bg-cyan-500/10 border-cyan-500/30 hover:bg-cyan-500/20"
+                    : "text-gray-300 bg-white/5 border-white/10 hover:bg-white/10"
                 }`}
-                title="Automatically read new Claude messages aloud"
+                title="Toggle compact session rendering"
               >
-                <Volume2 size={13} />
-                Auto-Read {ttsAutoRead ? "ON" : "OFF"}
+                {sessionCompactMode ? "Compact ON" : "Compact OFF"}
               </button>
 
+              <button
+                onClick={() => setAutoAnswerQuestions((p) => !p)}
+                className={`rounded-lg px-2.5 py-1 text-[11px] lg:px-3 lg:py-1.5 lg:text-xs font-semibold border transition-colors shrink-0 ${
+                  autoAnswerQuestions
+                    ? "text-emerald-300 bg-emerald-500/10 border-emerald-500/30 hover:bg-emerald-500/20"
+                    : "text-gray-300 bg-white/5 border-white/10 hover:bg-white/10"
+                }`}
+                title="Auto-answer Claude questions with first option"
+              >
+                {autoAnswerQuestions ? "Auto Answer ON" : "Auto Answer OFF"}
+              </button>
+
+              {/* Read All + Auto-Read desktop */}
+              {!isMobileViewport && (
+              <div className="btn-row desktop-controls-row flex gap-2 w-full lg:w-auto">
+                <button
+                  onClick={() => {
+                    if (ttsIsSpeakingRef.current) {
+                      ttsStop();
+                    } else {
+                      const msgs = claudeMessages.filter(m => m.role === "assistant" && m.content?.trim());
+                      if (msgs.length === 0) return;
+                      ttsQueueRef.current = msgs.slice(1).map(m => ({ msgId: m.id, text: m.content.trim() }));
+                      const first = msgs[0];
+                      ttsIsSpeakingRef.current = true;
+                      const utterance = new SpeechSynthesisUtterance(first.content.trim());
+                      utterance.rate = ttsSpeed;
+                      const voice = getSelectedVoice();
+                      if (voice) utterance.voice = voice;
+                      utterance.onend = () => { ttsPlayNext(); };
+                      utterance.onerror = () => { ttsPlayNext(); };
+                      ttsUtteranceRef.current = utterance;
+                      ttsCurrentTextRef.current = { msgId: first.id, text: first.content.trim() };
+                      setTtsPlayingId(first.id);
+                      window.speechSynthesis.speak(utterance);
+                      setTtsAutoRead(true);
+                    }
+                  }}
+                  className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition-colors border ${
+                    ttsIsSpeakingRef.current
+                      ? "text-white bg-red-600/80 border-red-500 hover:bg-red-500"
+                      : "text-violet-200 bg-violet-500/15 border-violet-500/30 hover:bg-violet-500/25"
+                  }`}
+                >
+                  {ttsPlayingId ? <><VolumeX size={14} /> Stop</> : <><Volume2 size={14} /> Read All</>}
+                </button>
+
+                <button
+                  onClick={() => { setTtsAutoRead((p) => !p); if (ttsAutoRead) ttsStop(); }}
+                  className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition-colors border ${
+                    ttsAutoRead
+                      ? "text-emerald-300 bg-emerald-600/20 border-emerald-500/40 hover:bg-emerald-600/30"
+                      : "text-gray-400 bg-white/5 border-white/10 hover:bg-white/10"
+                  }`}
+                >
+                  <Volume2 size={14} />
+                  {ttsAutoRead ? "Auto ON" : "Auto OFF"}
+                </button>
+              </div>
+              )}
+
+              {/* Mobile quick controls in one straight row */}
+              {isMobileViewport && (
+              <div className="btn-row mobile-controls-row flex items-center gap-1.5 w-auto">
+                <button
+                  onClick={() => {
+                    if (ttsIsSpeakingRef.current) {
+                      ttsStop();
+                    } else {
+                      const msgs = claudeMessages.filter(m => m.role === "assistant" && m.content?.trim());
+                      if (msgs.length === 0) return;
+                      ttsQueueRef.current = msgs.slice(1).map(m => ({ msgId: m.id, text: m.content.trim() }));
+                      const first = msgs[0];
+                      ttsIsSpeakingRef.current = true;
+                      const utterance = new SpeechSynthesisUtterance(first.content.trim());
+                      utterance.rate = ttsSpeed;
+                      const voice = getSelectedVoice();
+                      if (voice) utterance.voice = voice;
+                      utterance.onend = () => { ttsPlayNext(); };
+                      utterance.onerror = () => { ttsPlayNext(); };
+                      ttsUtteranceRef.current = utterance;
+                      ttsCurrentTextRef.current = { msgId: first.id, text: first.content.trim() };
+                      setTtsPlayingId(first.id);
+                      window.speechSynthesis.speak(utterance);
+                      setTtsAutoRead(true);
+                    }
+                  }}
+                  className={`flex items-center justify-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors border shrink-0 ${
+                    ttsIsSpeakingRef.current
+                      ? "text-white bg-red-600/80 border-red-500 hover:bg-red-500"
+                      : "text-violet-200 bg-violet-500/15 border-violet-500/30 hover:bg-violet-500/25"
+                  }`}
+                >
+                  {ttsPlayingId ? <><VolumeX size={12} /> Stop</> : <><Volume2 size={12} /> Read</>}
+                </button>
+                <button
+                  onClick={() => { setTtsAutoRead((p) => !p); if (ttsAutoRead) ttsStop(); }}
+                  className={`flex items-center justify-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors border shrink-0 ${
+                    ttsAutoRead
+                      ? "text-emerald-300 bg-emerald-600/20 border-emerald-500/40 hover:bg-emerald-600/30"
+                      : "text-gray-400 bg-white/5 border-white/10 hover:bg-white/10"
+                  }`}
+                >
+                  <Volume2 size={12} />
+                  {ttsAutoRead ? "Auto" : "Manual"}
+                </button>
+                <label className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-gray-300 shrink-0">
+                  <Gauge size={12} className="text-gray-400" />
+                  <span className="text-[10px] uppercase tracking-wide text-gray-400">Speed</span>
+                  <select
+                    value={ttsSpeed}
+                    onChange={(e) => setTtsSpeed(Number(e.target.value))}
+                    className="bg-transparent text-gray-200 outline-none"
+                    title="Voice speed"
+                  >
+                    {[0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                      <option key={speed} value={speed} className="bg-[#111114]">
+                        {speed}x
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              )}
+
               {/* TTS Speed */}
-              <div className="flex items-center gap-1">
-                <Gauge size={13} className="text-gray-500" />
+              {!isMobileViewport && (
+              <div className="speed-row hidden lg:flex items-center justify-center gap-1.5 w-full lg:w-auto">
+                <Gauge size={13} className="text-gray-500 hidden lg:block" />
                 {[0.75, 1, 1.25, 1.5, 2].map((speed) => (
                   <button
                     key={speed}
                     onClick={() => setTtsSpeed(speed)}
-                    className={`rounded px-1.5 py-1 text-[10px] font-bold transition-colors ${
+                    className={`rounded-lg px-3 py-2.5 lg:px-1.5 lg:py-1 text-sm lg:text-[10px] font-bold transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center ${
                       ttsSpeed === speed
                         ? "text-white bg-purple-600 border border-purple-500"
                         : "text-gray-400 bg-white/5 border border-white/10 hover:bg-white/10"
@@ -1583,13 +2447,14 @@ export default function AdminPage() {
                   </button>
                 ))}
               </div>
+              )}
 
-              {/* Voice selector */}
+              {/* Voice selector — hidden on mobile */}
               {ttsAvailableVoices.length > 0 && (
                 <select
                   value={ttsVoiceName}
                   onChange={(e) => setTtsVoiceName(e.target.value)}
-                  className="bg-white text-black border border-gray-300 rounded-lg px-2 py-1.5 text-[11px] font-medium focus:outline-none focus:border-purple-500 max-w-[200px] cursor-pointer"
+                  className="hidden lg:block bg-white text-black border border-gray-300 rounded-lg px-2 py-1.5 text-[11px] font-medium focus:outline-none focus:border-purple-500 max-w-[200px] cursor-pointer"
                   title="Select voice"
                   style={{ colorScheme: "light" }}
                 >
@@ -1612,10 +2477,13 @@ export default function AdminPage() {
                 </select>
               )}
             </div>
+            </div>
+            </>
+            )}
           </div>
 
           {/* Messages */}
-          <div ref={claudeScrollRef} onScroll={handleClaudeScroll} onTouchStart={handleClaudeTouchStart} className="relative overflow-y-auto p-4 space-y-3 font-mono text-sm flex-1 overscroll-contain" style={{ minHeight: "200px" }}>
+          <div ref={claudeScrollRef} onScroll={handleClaudeScroll} onTouchStart={handleClaudeTouchStart} className="relative overflow-y-auto p-3 lg:p-4 pb-28 space-y-3 text-base flex-1 overscroll-contain touch-pan-y" style={{ minHeight: "200px", WebkitOverflowScrolling: "touch" }}>
             {claudeMessages.length === 0 && (
               <div className="text-center text-gray-400 py-8">
                 {bridgeSelectedHwnd ? (
@@ -1639,16 +2507,7 @@ export default function AdminPage() {
             )}
 
             {(() => {
-              const searchLower = claudeSearch.toLowerCase();
-              const filtered = claudeSearch
-                ? claudeMessages.filter((m) =>
-                    m.content?.toLowerCase().includes(searchLower) ||
-                    m.thinking?.toLowerCase().includes(searchLower) ||
-                    m.adminFrom?.toLowerCase().includes(searchLower)
-                  )
-                : claudeMessages;
-
-              if (claudeSearch && filtered.length === 0) {
+              if (claudeSearch && filteredClaudeMessages.length === 0) {
                 return (
                   <div className="text-center text-gray-400 py-6">
                     <Search size={24} className="mx-auto mb-2 text-gray-500" />
@@ -1657,18 +2516,32 @@ export default function AdminPage() {
                 );
               }
 
-              return filtered.map((msg, msgIdx) => {
-              const isLastAssistant = msg.role === "assistant" && msgIdx === filtered.length - 1;
+              return (
+                <>
+                  {hiddenMessageCount > 0 && (
+                    <div className="sticky top-2 z-10 flex justify-center">
+                      <button
+                        onClick={() => setRenderedMessageCount((prev) => prev + MESSAGE_RENDER_BATCH)}
+                        className="rounded-full border border-cyan-500/30 bg-[#151922]/95 px-3 py-1.5 text-[11px] font-semibold text-cyan-300 shadow-sm hover:bg-cyan-500/15 transition-colors"
+                      >
+                        Load {Math.min(MESSAGE_RENDER_BATCH, hiddenMessageCount)} older messages
+                      </button>
+                    </div>
+                  )}
+                  {visibleClaudeMessages.map((msg, msgIdx) => {
+              const isLastAssistant = msg.role === "assistant" && msgIdx === visibleClaudeMessages.length - 1;
               const hasToolsRunning = isLastAssistant && msg.toolUses && msg.toolUses.length > 0 && !msg.content;
               const isDone = msg.role === "assistant" && msg.content && !hasToolsRunning;
+              const displayMessage = getDisplayMessageText(msg);
 
               // Admin note styling
               if (msg.isAdminNote) {
                 return (
-                  <div key={msg.id} className="rounded-lg px-4 py-3 bg-amber-500/15 border border-amber-500/30">
+                  <div key={msg.id} className="flex justify-end">
+                  <div className="msg-card msg-card-user w-full lg:w-[78%] rounded-lg px-4 py-3 bg-amber-500/15 border border-amber-500/30">
                     <div className="flex items-center gap-2 mb-1.5">
-                      <Crown size={14} className="text-amber-400" />
-                      <span className="text-xs font-bold text-amber-400">
+                      <Crown size={16} className="text-amber-400" />
+                      <span className="msg-role text-xs font-bold text-amber-400">
                         {msg.adminFrom || "Admin"}
                       </span>
                       <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wider font-medium ${
@@ -1678,78 +2551,87 @@ export default function AdminPage() {
                       }`}>
                         {msg.viaBridge ? "Bridge" : "Web"}
                       </span>
-                      {msg.timestamp && (
-                        <span className="text-[10px] text-gray-400 ml-auto" title={new Date(msg.timestamp).toLocaleString()}>
+                      {!isMobileViewport && msg.timestamp && (
+                        <span className="msg-time text-[10px] text-gray-400 ml-auto" title={new Date(msg.timestamp).toLocaleString()}>
                           {relativeTime(msg.timestamp)}
                         </span>
                       )}
                     </div>
-                    <div className="text-sm text-white whitespace-pre-wrap break-words">
+                    <div className="msg-content text-base text-white whitespace-pre-wrap break-words">
                       {msg.content}
                     </div>
-                    <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-amber-500/20">
+                    <div className="hidden lg:flex items-center gap-1.5 mt-2">
                       <button
                         onClick={() => ttsPlayingId === msg.id ? ttsStop() : ttsSpeak(msg.id, msg.content)}
-                        className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${ttsPlayingId === msg.id ? "text-white bg-red-600 hover:bg-red-500 border border-red-500" : "text-white bg-green-600 hover:bg-green-500 border border-green-500"}`}
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold transition-colors border ${ttsPlayingId === msg.id ? "text-white bg-red-600/80 hover:bg-red-500 border-red-500" : "text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/30"}`}
                       >
-                        {ttsPlayingId === msg.id ? <><VolumeX size={16} /> Stop Reading</> : <><Volume2 size={16} /> Read Aloud</>}
+                        {ttsPlayingId === msg.id ? <><VolumeX size={12} /> Stop</> : <><Volume2 size={12} /> Read</>}
                       </button>
                       <button
                         onClick={() => copyMessage(msg.id, msg.content)}
-                        className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-gray-300 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors"
+                        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold text-gray-300 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors"
                       >
-                        {copiedMsgId === msg.id ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy</>}
+                        {copiedMsgId === msg.id ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
                       </button>
                     </div>
+                  </div>
                   </div>
                 );
               }
 
               return (
-                <div key={msg.id} className={`rounded-lg px-4 py-3 ${
+                <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div className={`msg-card ${msg.role === "user" ? "msg-card-user" : "msg-card-assistant"} w-full lg:w-[78%] rounded-xl px-4 py-4 ${
                   msg.role === "user"
                     ? "bg-blue-500/15 border border-blue-500/30"
+                    : msg.adminFrom === "Codex"
+                    ? "bg-green-500/10 border border-green-500/25"
                     : "bg-[#1c1c22] border border-[#2a2a32]"
                 }`}>
                   {/* Message header */}
                   <div className="flex items-center gap-2 mb-1.5">
                     {msg.role === "user" ? (
-                      <Crown size={14} className="text-yellow-400" />
+                      <Crown size={16} className="text-yellow-400" />
                     ) : (
-                      <Bot size={14} className="text-purple-400" />
+                      <Bot size={16} className={msg.adminFrom === "Codex" ? "text-green-400" : "text-purple-400"} />
                     )}
-                    <span className={`text-xs font-bold ${
-                      msg.role === "user" ? "text-yellow-400" : "text-purple-400"
+                    <span className={`msg-role text-xs font-bold ${
+                      msg.role === "user" ? "text-yellow-400" : msg.adminFrom === "Codex" ? "text-green-400" : "text-purple-400"
                     }`}>
-                      {msg.role === "user" ? "You" : "Claude"}
+                      {msg.role === "user" ? "You" : msg.adminFrom === "Codex" ? "Codex" : "Claude"}
                     </span>
+                    {!sessionCompactMode && !isMobileViewport && msg.adminFrom === "Codex" && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wider font-medium bg-green-500/20 text-green-400">
+                        Codex
+                      </span>
+                    )}
 
                     {/* Status indicator for assistant messages */}
-                    {msg.role === "assistant" && (
+                    {!sessionCompactMode && !isMobileViewport && msg.role === "assistant" && (
                       <span className="flex items-center gap-1 ml-1">
                         {hasToolsRunning ? (
-                          <span className="flex items-center gap-1 text-[10px] text-amber-400">
-                            <span className="inline-block h-2 w-2 animate-spin rounded-full border border-amber-400 border-t-transparent" />
+                          <span className="msg-status flex items-center gap-1 text-xs text-amber-400">
+                            <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
                             Working
                           </span>
                         ) : isDone ? (
-                          <span className="flex items-center gap-1 text-[10px] text-green-400">
-                            <BadgeCheck size={12} />
+                          <span className="msg-status flex items-center gap-1 text-xs text-green-400">
+                            <BadgeCheck size={14} />
                             Done
                           </span>
                         ) : null}
                       </span>
                     )}
 
-                    {msg.timestamp && (
-                      <span className="text-[10px] text-gray-400 ml-auto" title={new Date(msg.timestamp).toLocaleString()}>
+                    {!isMobileViewport && msg.timestamp && (
+                      <span className="msg-time text-[10px] text-gray-400 ml-auto" title={new Date(msg.timestamp).toLocaleString()}>
                         {relativeTime(msg.timestamp)}
                       </span>
                     )}
                   </div>
 
                   {/* Thinking (collapsible) */}
-                  {msg.thinking && (
+                  {!sessionCompactMode && msg.thinking && (
                     <div className="mb-2 rounded bg-purple-500/10 border border-purple-500/20 overflow-hidden">
                       <button
                         onClick={() => toggleThinking(msg.id)}
@@ -1760,26 +2642,50 @@ export default function AdminPage() {
                         <ChevronDown size={12} className={`text-purple-400/60 ml-auto transition-transform ${collapsedThinking.has(msg.id) ? "" : "rotate-180"}`} />
                       </button>
                       {!collapsedThinking.has(msg.id) && (
-                        <p className="text-xs text-gray-300 whitespace-pre-wrap px-3 pb-2">{msg.thinking}</p>
+                        <>
+                          <p className="msg-thinking text-xs text-gray-300 whitespace-pre-wrap px-3 pb-2">{msg.thinking}</p>
+                          <div className="px-3 pb-2">
+                            <button
+                              onClick={() => ttsPlayingId === `${msg.id}-thinking` ? ttsStop() : ttsSpeak(`${msg.id}-thinking`, msg.thinking!)}
+                              className={`msg-btn flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors w-full ${
+                                ttsPlayingId === `${msg.id}-thinking`
+                                  ? "text-white bg-red-600 hover:bg-red-500 border border-red-500"
+                                  : "text-purple-300 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30"
+                              }`}
+                            >
+                              {ttsPlayingId === `${msg.id}-thinking` ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                              {ttsPlayingId === `${msg.id}-thinking` ? "Stop" : "Read Thoughts"}
+                            </button>
+                          </div>
+                        </>
                       )}
                     </div>
                   )}
 
                   {/* Content */}
                   {msg.content && (
-                    <div className={`text-sm whitespace-pre-wrap break-words ${
+                    <div className={`msg-content text-base whitespace-pre-wrap break-words ${
                       msg.role === "user" ? "text-white" : "text-gray-100"
                     }`}>
-                      {msg.content}
+                      {displayMessage.text}
                     </div>
                   )}
 
+                  {displayMessage.truncated && (
+                    <button
+                      onClick={() => toggleMessageExpand(msg.id)}
+                      className="mt-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30 px-3 py-1.5 text-xs font-semibold text-cyan-300 hover:bg-cyan-500/20 transition-colors"
+                    >
+                      Show full message
+                    </button>
+                  )}
+
                   {/* Tool uses */}
-                  {msg.toolUses && msg.toolUses.length > 0 && (
+                  {!sessionCompactMode && msg.toolUses && msg.toolUses.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       {msg.toolUses.map((tool, i) => (
-                        <span key={i} className="inline-flex items-center gap-1 rounded bg-[#22222a] px-2 py-0.5 text-[10px] text-cyan-300 border border-cyan-500/20">
-                          <Wrench size={10} />
+                        <span key={i} className="tool-badge inline-flex items-center gap-1.5 rounded-lg bg-[#22222a] px-3 py-1.5 text-sm text-cyan-300 border border-cyan-500/20">
+                          <Wrench size={14} />
                           {tool.name}
                         </span>
                       ))}
@@ -1787,7 +2693,7 @@ export default function AdminPage() {
                   )}
 
                   {/* Pending Questions Card */}
-                  {msg.pendingQuestions && msg.pendingQuestions.length > 0 && !answeredQuestionIds.has(msg.id) && (
+                  {!sessionCompactMode && msg.pendingQuestions && msg.pendingQuestions.length > 0 && !answeredQuestionIds.has(msg.id) && (
                     <div className="mt-3 rounded-xl bg-gradient-to-br from-purple-500/10 to-blue-500/10 border border-purple-500/30 p-4 space-y-4">
                       <div className="flex items-center gap-2">
                         <div className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
@@ -1853,28 +2759,31 @@ export default function AdminPage() {
 
                   {/* Play / Stop TTS + Copy buttons */}
                   {msg.content && (
-                    <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-white/10">
+                    <div className="hidden lg:flex items-center gap-1.5 mt-2">
                       <button
-                        onClick={() => ttsPlayingId === msg.id ? ttsStop() : ttsSpeak(msg.id, msg.content)}
-                        className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                        onClick={() => ttsPlayingId === msg.id ? ttsStop() : ttsSpeak(msg.id, cleanMessageText(msg.content))}
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold transition-colors border ${
                           ttsPlayingId === msg.id
-                            ? "text-white bg-red-600 hover:bg-red-500 border border-red-500"
-                            : "text-white bg-green-600 hover:bg-green-500 border border-green-500"
+                            ? "text-white bg-red-600/80 hover:bg-red-500 border-red-500"
+                            : "text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/30"
                         }`}
                       >
-                        {ttsPlayingId === msg.id ? <><VolumeX size={16} /> Stop Reading</> : <><Volume2 size={16} /> Read Aloud</>}
+                        {ttsPlayingId === msg.id ? <><VolumeX size={12} /> Stop</> : <><Volume2 size={12} /> Read</>}
                       </button>
                       <button
-                        onClick={() => copyMessage(msg.id, msg.content)}
-                        className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-gray-300 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors"
+                        onClick={() => copyMessage(msg.id, cleanMessageText(msg.content))}
+                        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold text-gray-300 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors"
                       >
-                        {copiedMsgId === msg.id ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy</>}
+                        {copiedMsgId === msg.id ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
                       </button>
                     </div>
                   )}
                 </div>
+                </div>
               );
-            });
+              })}
+                </>
+              );
             })()}
 
             <div ref={claudeEndRef} />
@@ -1891,23 +2800,87 @@ export default function AdminPage() {
             )}
           </div>
 
+          {/* Monitored Windows (e.g., Codex) */}
+          {monitorTargets.length > 0 && (
+            <div className="hidden lg:block border-t border-[#2a2a30] bg-[#0d0d12] px-4 py-3 shrink-0">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+                <span className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Monitored Windows</span>
+              </div>
+              {monitorTargets.map((m) => {
+                const thumb = bridgeThumbnails[m.hwnd];
+                const output = monitorOutputs[m.hwnd];
+                const outputLines = output?.text ? output.text.split("\n").filter((l: string) => l.trim()) : [];
+                return (
+                  <div key={m.hwnd} className="rounded-lg border border-blue-500/20 bg-[#111] overflow-hidden mb-2">
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-blue-500/10">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="h-2 w-2 rounded-full bg-blue-500" />
+                        <span className="text-xs font-bold text-blue-400 truncate">{m.label}</span>
+                        <span className="text-[10px] text-gray-500 truncate">{m.title}</span>
+                      </div>
+                      <button
+                        onClick={() => bridgeUnmonitorWindow(m.hwnd)}
+                        className="shrink-0 rounded p-1 text-gray-600 hover:bg-red-500/10 hover:text-red-400 transition-colors"
+                        title="Stop monitoring"
+                      >
+                        <XIcon size={12} />
+                      </button>
+                    </div>
+                    <div className="flex">
+                      {/* Thumbnail */}
+                      <div className="w-48 shrink-0 h-28 bg-[#080810] flex items-center justify-center overflow-hidden">
+                        {thumb ? (
+                          <img src={`data:image/png;base64,${thumb}`} alt={m.label} className="w-full h-full object-contain" />
+                        ) : (
+                          <div className="text-gray-600 text-xs flex flex-col items-center gap-1">
+                            <Terminal size={18} className="text-gray-700" />
+                            <span>Loading...</span>
+                          </div>
+                        )}
+                      </div>
+                      {/* Console output */}
+                      <div className="flex-1 overflow-auto max-h-28 bg-[#0a0a0f] p-2 font-mono text-[11px] text-gray-300 leading-tight">
+                        {outputLines.length > 0 ? (
+                          outputLines.slice(-15).map((line: string, i: number) => (
+                            <div key={i} className="whitespace-pre-wrap">{line}</div>
+                          ))
+                        ) : (
+                          <div className="text-gray-600 italic">Waiting for console output...</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* Message input */}
-          <div className="border-t border-[#2a2a30] bg-[#18181c] px-4 py-3 shrink-0">
+          <div className={`session-input-area border-t border-[#2a2a30] bg-[#18181c] px-3 lg:px-4 py-3 shrink-0 ${isMobileViewport ? "mb-[44px]" : ""}`}>
             {/* Sent toast */}
             {/* Bridge connection indicator */}
-            {bridgeSelectedHwnd && (
+            {!isMobileSessionFocus && bridgeSelectedHwnd && (
               <div className="mb-2 flex items-center gap-2 rounded-lg bg-green-500/5 border border-green-500/20 px-3 py-2">
-                <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse shrink-0" />
-                <span className="text-xs text-green-400 font-medium">
+                <div className="h-2.5 w-2.5 rounded-full bg-green-500 animate-pulse shrink-0" />
+                <span className="bridge-indicator text-xs text-green-400 font-medium">
                   Bridge: {bridgeSelectedLabel}
                 </span>
-                <span className="text-[10px] text-gray-400">Messages will be typed into this terminal</span>
+                <span className="bridge-indicator bridge-detail text-[10px] text-gray-400">Messages will be typed into this terminal</span>
+                {!!bridgeStatusReason && (
+                  <span className="ml-auto text-[10px] text-gray-500 truncate max-w-[45%]" title={bridgeStatusReason}>
+                    {bridgeStatusReason}
+                  </span>
+                )}
               </div>
             )}
-            {!bridgeSelectedHwnd && (
+            {!isMobileSessionFocus && !bridgeSelectedHwnd && (
               <div className="mb-2 flex items-center gap-2 rounded-lg bg-yellow-500/5 border border-yellow-500/20 px-3 py-2">
                 <div className="h-2 w-2 rounded-full bg-yellow-500 shrink-0" />
                 <span className="text-xs text-yellow-400 font-medium">No bridge target</span>
+                {!!bridgeStatusReason && (
+                  <span className="text-[10px] text-gray-500 truncate">{bridgeStatusReason}</span>
+                )}
                 <button onClick={() => setActiveTab("bridge")} className="text-[10px] text-purple-300 hover:text-purple-200 ml-auto">
                   Connect in Bridge tab
                 </button>
@@ -1921,54 +2894,318 @@ export default function AdminPage() {
                 </span>
               </div>
             )}
+            {/* Image preview */}
+            {pendingImagePreview && (
+              <div className="mb-2 relative inline-block">
+                <img src={pendingImagePreview} alt="Attached" className="h-16 rounded-lg border border-purple-500/30" />
+                <button
+                  type="button"
+                  onClick={() => { setPendingImage(null); setPendingImagePreview(null); }}
+                  className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center text-xs hover:bg-red-400"
+                >
+                  <XIcon size={10} />
+                </button>
+              </div>
+            )}
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                const text = claudeNoteInput.trim();
-                if (!text || isSendingNote) return;
+                if (voiceListening && voiceRecognitionRef.current) {
+                  voiceShouldListenRef.current = false;
+                  commitVoiceText(true);
+                  try { voiceRecognitionRef.current.stop(); } catch {}
+                }
+                const text = (claudeInputRef.current?.value || "").trim();
+                if ((!text && !pendingImage) || isSendingNote) return;
                 setIsSendingNote(true);
                 try {
-                  // Save note + write to message queue (bridge poll loop will type it)
-                  await fetch("/api/admin/claude-session", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    credentials: "include",
-                    body: JSON.stringify({ message: text, projectDir: bridgeSelectedProjectDir, viaBridge: !!bridgeSelectedHwnd }),
-                  });
+                  let imagePath = "";
+                  // Upload image first if attached
+                  if (pendingImage) {
+                    setIsUploadingImage(true);
+                    const formData = new FormData();
+                    formData.append("file", pendingImage);
+                    const uploadRes = await fetch("/api/admin/upload-image", {
+                      method: "POST",
+                      credentials: "include",
+                      body: formData,
+                    });
+                    if (uploadRes.ok) {
+                      const data = await uploadRes.json();
+                      imagePath = data.absolutePath;
+                    }
+                    setIsUploadingImage(false);
+                    setPendingImage(null);
+                    setPendingImagePreview(null);
+                  }
 
-                  setClaudeNoteInput("");
+                  // Build message with image path if present
+                  const fullMessage = imagePath
+                    ? (text ? `${text}\n\nImage: ${imagePath}` : `Look at this image: ${imagePath}`)
+                    : text;
+
+                  if (fullMessage) {
+                    await fetch("/api/admin/claude-session", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      credentials: "include",
+                      body: JSON.stringify({ message: fullMessage, projectDir: bridgeSelectedProjectDir, viaBridge: !!bridgeSelectedHwnd }),
+                    });
+                  }
+
+                  if (claudeInputRef.current) {
+                    claudeInputRef.current.value = "";
+                    claudeInputRef.current.style.height = "auto";
+                  }
                   fetchClaudeSession();
 
                   setClaudeCopiedToast(true);
                   setTimeout(() => setClaudeCopiedToast(false), 5000);
                 } catch {
-                  // Network error — don't show success toast
+                  // Network error
                 }
                 setIsSendingNote(false);
               }}
-              className="flex items-center gap-2"
+              className="flex items-center gap-2 w-full overflow-visible"
             >
+              {/* Hidden file input */}
               <input
-                type="text"
-                value={claudeNoteInput}
-                onChange={(e) => setClaudeNoteInput(e.target.value)}
-                placeholder={bridgeSelectedHwnd ? "Type a message (will be typed into terminal)..." : "Type a message for Claude..."}
-                className="flex-1 bg-[#111114] border border-[#333] rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-500 font-mono focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20"
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    setPendingImage(file);
+                    const url = URL.createObjectURL(file);
+                    setPendingImagePreview(url);
+                  }
+                  e.target.value = "";
+                }}
               />
+              {/* Primary action button: open tools sheet */}
+              <button
+                type="button"
+                onClick={() => setSessionMenuOpen(true)}
+                disabled={isUploadingImage}
+                className="flex items-center justify-center w-12 h-12 lg:w-9 lg:h-9 rounded-xl bg-[#1a1a24] border border-[#333] text-gray-400 hover:text-purple-400 hover:border-purple-500/30 transition-colors disabled:opacity-40 shrink-0"
+                title="Open tools"
+              >
+                {isUploadingImage ? <Loader2 size={18} className="animate-spin" /> : <span className="text-2xl leading-none">+</span>}
+              </button>
+              <textarea
+                ref={claudeInputRef}
+                placeholder={isMobileSessionFocus ? "Message" : (bridgeSelectedHwnd ? "Type a message..." : "Type a message for Claude...")}
+                rows={1}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    const form = e.currentTarget.form;
+                    if (form) form.requestSubmit();
+                  }
+                }}
+                onInput={(e) => {
+                  const el = e.currentTarget;
+                  el.style.height = "auto";
+                  el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+                }}
+                className="conversation-composer-input flex-1 min-w-0 bg-[#111114] border border-[#333] rounded-xl px-4 py-3 lg:py-2 text-base text-white placeholder:text-gray-500 focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 resize-none"
+              />
+              {voiceSupported && (
+                <button
+                  type="button"
+                  onClick={toggleVoiceInput}
+                  className={`flex items-center justify-center w-12 h-12 lg:w-9 lg:h-9 rounded-xl border transition-colors shrink-0 ${
+                    voiceListening
+                      ? "bg-red-500/20 border-red-500/50 text-red-300 hover:bg-red-500/30"
+                      : "bg-[#1a1a24] border-[#333] text-gray-300 hover:text-purple-300 hover:border-purple-500/30"
+                  }`}
+                  title={voiceListening ? "Stop dictation" : "Start dictation"}
+                >
+                  {voiceListening ? <MicOff size={18} /> : <Mic size={18} />}
+                </button>
+              )}
               <button
                 type="submit"
-                disabled={!claudeNoteInput.trim() || isSendingNote}
-                className="flex items-center justify-center w-9 h-9 rounded-lg bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                aria-label="Copy and send"
+                disabled={isSendingNote}
+                className="flex items-center justify-center w-12 h-12 lg:w-9 lg:h-9 rounded-xl bg-purple-600 text-white hover:bg-purple-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                aria-label="Send message"
               >
-                <Send size={16} />
+                <Send size={18} />
               </button>
             </form>
-            <p className="text-[10px] text-gray-400 mt-1.5">
+            {!isMobileSessionFocus && (
+            <p className="input-helper text-[10px] text-gray-400 mt-1.5">
               {bridgeSelectedHwnd
-                ? "Messages are typed into the connected terminal via Bridge and logged in the session view."
-                : "Connect a terminal in the Bridge tab to enable direct input. Messages are saved to session log."}
+                ? "Messages typed into terminal via Bridge. Attach images with clip icon."
+                : "Connect a terminal in Bridge tab to enable input."}
             </p>
+            )}
+            {!isMobileSessionFocus && voiceSupported && (
+              <p className={`text-[10px] mt-1 ${voiceListening ? "text-red-300" : voiceError ? "text-yellow-300" : "text-gray-500"}`}>
+                {voiceListening ? "Recording... tap mic again to transcribe into text." : voiceError || "Tap mic to record, tap again to insert full transcript."}
+              </p>
+            )}
+          </div>
+        </div>
+        {isMobileViewport && sessionMenuOpen && (
+          <>
+            <button
+              type="button"
+              className="fixed inset-0 z-40 bg-black/60"
+              onClick={() => setSessionMenuOpen(false)}
+              aria-label="Close menu"
+            />
+            <div
+              className="fixed inset-x-0 bottom-0 z-50 rounded-t-3xl border-t border-border bg-[#12131b] p-4 pb-[calc(16px+env(safe-area-inset-bottom))] shadow-2xl"
+              onTouchStart={(e) => { sessionSheetStartYRef.current = e.touches[0]?.clientY ?? null; }}
+              onTouchEnd={(e) => {
+                const startY = sessionSheetStartYRef.current;
+                sessionSheetStartYRef.current = null;
+                if (startY === null) return;
+                const endY = e.changedTouches[0]?.clientY ?? startY;
+                if (endY - startY > 80) setSessionMenuOpen(false);
+              }}
+              data-no-swipe="true"
+            >
+              <div className="mx-auto mb-3 h-1.5 w-10 rounded-full bg-white/20" />
+              <div className="space-y-3">
+                <button
+                  onClick={() => {
+                    imageInputRef.current?.click();
+                    setSessionMenuOpen(false);
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm font-medium text-gray-100"
+                >
+                  Attach Image
+                </button>
+                <button
+                  onClick={() => {
+                    setSessionCompactMode((p) => !p);
+                    setSessionMenuOpen(false);
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm font-medium text-gray-100"
+                >
+                  {sessionCompactMode ? "Switch to Full Messages" : "Switch to Compact Messages"}
+                </button>
+                <button
+                  onClick={() => {
+                    setTtsAutoRead((p) => !p);
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm font-medium text-gray-100"
+                >
+                  Voice Auto Read: {ttsAutoRead ? "On" : "Off"}
+                </button>
+                <button
+                  onClick={() => {
+                    if (ttsIsSpeakingRef.current) ttsStop();
+                    else {
+                      const msgs = claudeMessages.filter((m) => m.role === "assistant" && m.content?.trim());
+                      if (msgs.length > 0) {
+                        ttsQueueRef.current = msgs.slice(1).map((m) => ({ msgId: m.id, text: m.content.trim() }));
+                        const first = msgs[0];
+                        ttsIsSpeakingRef.current = true;
+                        const utterance = new SpeechSynthesisUtterance(first.content.trim());
+                        utterance.rate = ttsSpeed;
+                        const voice = getSelectedVoice();
+                        if (voice) utterance.voice = voice;
+                        utterance.onend = () => { ttsPlayNext(); };
+                        utterance.onerror = () => { ttsPlayNext(); };
+                        ttsUtteranceRef.current = utterance;
+                        ttsCurrentTextRef.current = { msgId: first.id, text: first.content.trim() };
+                        setTtsPlayingId(first.id);
+                        window.speechSynthesis.speak(utterance);
+                      }
+                    }
+                    setSessionMenuOpen(false);
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm font-medium text-gray-100"
+                >
+                  {ttsPlayingId ? "Stop Voice Playback" : "Read Assistant Messages"}
+                </button>
+                <label className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-gray-100">
+                  Voice Speed
+                  <select
+                    value={ttsSpeed}
+                    onChange={(e) => setTtsSpeed(Number(e.target.value))}
+                    className="mt-2 w-full rounded-lg border border-white/10 bg-[#0e1017] px-3 py-2 text-sm text-gray-100 outline-none"
+                  >
+                    {[0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                      <option key={speed} value={speed}>
+                        {speed}x
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  onClick={() => {
+                    setAutoAnswerQuestions((p) => !p);
+                    setSessionMenuOpen(false);
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm font-medium text-gray-100"
+                >
+                  Auto Answer: {autoAnswerQuestions ? "On" : "Off"}
+                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => {
+                      refreshSessionData();
+                      setSessionMenuOpen(false);
+                    }}
+                    className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm font-semibold text-cyan-300"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    onClick={() => {
+                      clearClaudeSession();
+                      setSessionMenuOpen(false);
+                    }}
+                    className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-300"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <button
+                  onClick={() => setSessionMenuOpen(false)}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-gray-200"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+        </>
+      )}
+
+      {isMobileViewport && (
+        <div
+          data-no-swipe="true"
+          className="fixed left-0 right-0 bottom-0 z-40 border-t border-border bg-bg-surface/95 backdrop-blur-sm"
+        >
+          <div className="admin-tabs flex gap-1 overflow-x-auto px-1.5 py-1 no-scrollbar">
+            {tabs.map((tab) => (
+              <button
+                key={`mobile-${tab.id}`}
+                onClick={() => setActiveTab(tab.id)}
+                className={`relative flex shrink-0 items-center justify-center gap-1 rounded-lg px-2 py-1 text-[10px] font-medium transition-all ${
+                  activeTab === tab.id
+                    ? "bg-bg-surface2 text-text shadow-sm"
+                    : "text-text-muted"
+                }`}
+                title={tab.label}
+              >
+                <tab.icon size={14} />
+                <span>{tab.label}</span>
+                {"badge" in tab && (tab as any).badge > 0 && (
+                  <span className="ml-1 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-1 text-[8px] font-bold text-white">
+                    {(tab as any).badge}
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
         </div>
       )}
@@ -2000,6 +3237,9 @@ export default function AdminPage() {
                 {bridgeStatus === "active" ? `HWND: ${bridgeSelectedHwnd}` :
                  bridgeStatus === "offline" ? "Bridge process not running on port 9876" :
                  "Select a Claude Code terminal below"}
+                {bridgeStatusReason ? ` · ${bridgeStatusReason}` : ""}
+                {bridgeStatusUpdatedAt ? ` · ${relativeTime(bridgeStatusUpdatedAt)}` : ""}
+                {bridgeErrorDetail ? ` · ${bridgeErrorDetail}` : ""}
               </div>
             </div>
             {bridgeSelectedHwnd && (
@@ -2078,7 +3318,7 @@ export default function AdminPage() {
           <div>
             <div className="flex items-center gap-2 mb-3">
               <span className="text-sm font-semibold text-gray-300">Claude Code Terminals</span>
-              <span className="rounded-full bg-purple-500/20 px-2 py-0.5 text-[10px] font-bold text-purple-400">{bridgeWindows.length}</span>
+              <span className="rounded-full bg-purple-500/20 px-2 py-0.5 text-[10px] font-bold text-purple-400">{bridgeWindows.filter(isClaudeWindow).length}</span>
               <div className="ml-auto flex items-center gap-2">
                 <button onClick={() => setShowLaunchInput(!showLaunchInput)} className="rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-1.5 text-xs font-medium text-green-400 hover:bg-green-500/20 transition-colors">
                   + Launch Claude
@@ -2106,7 +3346,7 @@ export default function AdminPage() {
               </div>
             )}
 
-            {bridgeWindows.length === 0 ? (
+            {bridgeWindows.filter(isClaudeWindow).length === 0 ? (
               <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[#2a2a3a] bg-[#111] py-12 text-gray-500">
                 <Monitor size={32} className="text-gray-700" />
                 <p className="text-sm font-medium text-gray-400">
@@ -2114,14 +3354,15 @@ export default function AdminPage() {
                 </p>
                 <p className="text-xs text-gray-600">
                   {bridgeStatus === "offline"
-                    ? "Start the bridge with: node claude-bridge/claude-bridge.js"
+                    ? "Start the bridge with: node tools/claude-bridge/claude-bridge.js"
                     : "Start a Claude Code session in a terminal, then click Refresh"}
                 </p>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {bridgeWindows.map((w) => {
+                {bridgeWindows.filter(isClaudeWindow).map((w) => {
                   const isSelected = w.hwnd === bridgeSelectedHwnd;
+                  const isMonitored = monitorTargets.some(m => m.hwnd === w.hwnd);
                   const thumb = bridgeThumbnails[w.hwnd];
                   return (
                     <div
@@ -2130,6 +3371,8 @@ export default function AdminPage() {
                       className={`group relative cursor-pointer rounded-xl border-2 overflow-hidden transition-all hover:-translate-y-0.5 ${
                         isSelected
                           ? "border-green-500 bg-green-500/5"
+                          : isMonitored
+                          ? "border-blue-500 bg-blue-500/5"
                           : "border-[#222] bg-[#111] hover:border-purple-500/50"
                       }`}
                     >
@@ -2146,7 +3389,7 @@ export default function AdminPage() {
                         {/* Hover overlay */}
                         {!isSelected && (
                           <div className="absolute inset-0 bg-purple-500/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                            <span className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-bold text-white">Select</span>
+                            <span className="rounded-lg bg-purple-600 px-4 py-2 text-sm font-bold text-white">Select</span>
                           </div>
                         )}
                         {/* Active badge */}
@@ -2180,6 +3423,16 @@ export default function AdminPage() {
                     </div>
                   );
                 })}
+              </div>
+            )}
+            {bridgeSelectionError && (
+              <div className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-300">
+                {bridgeSelectionError}
+              </div>
+            )}
+            {bridgeWindows.some((w) => !isClaudeWindow(w)) && (
+              <div className="mt-2 text-[11px] text-gray-500">
+                Hidden non-Claude windows: {bridgeWindows.filter((w) => !isClaudeWindow(w)).length}
               </div>
             )}
           </div>

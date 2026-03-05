@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getTreasuryUserId } from "@/lib/treasury";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 function calculateRevenueSharePct(followerCount: number): number {
   if (followerCount >= 20000) return 80;
@@ -10,6 +11,15 @@ function calculateRevenueSharePct(followerCount: number): number {
 
 // GET: Returns a random approved custom ad as VAST XML for the IMA SDK
 export async function GET(request: NextRequest) {
+  // IP-based rate limiting: 30 requests per minute
+  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  if (!checkRateLimit(`ad_serve:${ip}`, 30, 60_000)) {
+    return new NextResponse(
+      `<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>`,
+      { headers: { "Content-Type": "application/xml" }, status: 429 }
+    );
+  }
+
   try {
     const now = new Date();
     const { searchParams } = new URL(request.url);

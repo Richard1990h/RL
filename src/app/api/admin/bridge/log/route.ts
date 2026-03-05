@@ -12,8 +12,15 @@ export async function GET() {
   const result = await bridgeFetch("/api/log");
   if (!result.ok) {
     return NextResponse.json(
-      { error: "Bridge unavailable", status: "offline", log: [], selectedHwnd: null },
-      { status: 502 }
+      {
+        error: "Bridge unavailable",
+        status: "offline",
+        statusReason: result.data?.error || `HTTP ${result.status}`,
+        bridgeStatusCode: result.status,
+        log: [],
+        selectedHwnd: null
+      },
+      { status: result.status }
     );
   }
   return NextResponse.json(result.data);

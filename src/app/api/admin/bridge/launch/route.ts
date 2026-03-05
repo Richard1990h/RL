@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireOwnerWithDevice } from "@/lib/auth";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 
 const CLAUDE_EXE = "C:\\Users\\Richard\\.local\\bin\\claude.exe";
+const DEFAULT_WORK_DIR = "C:\\Users\\Richard\\Desktop\\RallyLive.ca\\rally-live";
 
 // Only allow paths under these roots
 const ALLOWED_ROOTS = [
@@ -30,21 +31,33 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const { action, workDir, pid } = await req.json();
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const { action, workDir, pid } = body;
 
   if (action === "launch") {
-    const dir = workDir || "C:\\Users\\Richard\\Desktop\\Rally Live";
+    const dir = workDir || DEFAULT_WORK_DIR;
     if (!isValidWorkDir(dir)) {
       return NextResponse.json({ ok: false, error: "Invalid working directory" }, { status: 400 });
     }
     if (!fs.existsSync(dir)) {
       return NextResponse.json({ ok: false, error: "Directory does not exist" }, { status: 400 });
     }
+    if (!fs.existsSync(CLAUDE_EXE)) {
+      return NextResponse.json({ ok: false, error: "Claude executable not found" }, { status: 500 });
+    }
     try {
-      exec(
-        `start "" cmd /c "cd /d "${dir}" && "${CLAUDE_EXE}""`,
-        { cwd: dir }
+      // Launch in a visible terminal so bridge window discovery can target it.
+      const child = spawn(
+        "cmd.exe",
+        ["/c", "start", "", "cmd.exe", "/k", `cd /d "${dir}" && "${CLAUDE_EXE}"`],
+        { cwd: dir, detached: true, stdio: "ignore", windowsHide: true }
       );
+      child.unref();
       return NextResponse.json({ ok: true, message: `Launching Claude in ${dir}` });
     } catch (err: any) {
       return NextResponse.json({ ok: false, error: err.message }, { status: 500 });

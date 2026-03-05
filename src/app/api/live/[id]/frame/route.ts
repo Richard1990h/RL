@@ -2,14 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 
 // In-memory store for latest video frames + audio per stream
-// Key: streamId, Value: { data: base64 JPEG, audio?: base64 webm audio chunk, updatedAt: timestamp }
-const frameStore = new Map<string, { data: string; audio?: string; updatedAt: number }>();
+// Video and audio have separate timestamps so viewers can deduplicate
+interface StreamData {
+  frame: string;
+  frameUpdatedAt: number;
+  audio?: string;
+  audioUpdatedAt: number;
+}
+const frameStore = new Map<string, StreamData>();
 
 // Cleanup frames older than 60 seconds
 setInterval(() => {
   const now = Date.now();
-  for (const [id, frame] of frameStore) {
-    if (now - frame.updatedAt > 60_000) {
+  for (const [id, data] of frameStore) {
+    if (now - data.frameUpdatedAt > 60_000) {
       frameStore.delete(id);
     }
   }
@@ -22,16 +28,17 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const frame = frameStore.get(id);
+    const data = frameStore.get(id);
 
-    if (!frame) {
-      return NextResponse.json({ frame: null, audio: null, updatedAt: 0 });
+    if (!data) {
+      return NextResponse.json({ frame: null, audio: null, updatedAt: 0, audioUpdatedAt: 0 });
     }
 
     return NextResponse.json({
-      frame: frame.data,
-      audio: frame.audio || null,
-      updatedAt: frame.updatedAt,
+      frame: data.frame,
+      audio: data.audio || null,
+      updatedAt: data.frameUpdatedAt,
+      audioUpdatedAt: data.audioUpdatedAt,
     });
   } catch (error) {
     console.error("GET /api/live/[id]/frame error:", error);
@@ -51,6 +58,16 @@ export async function POST(
     }
 
     const { id } = await params;
+
+    // Verify the user is the stream host
+    const stream = await (await import("@/lib/db")).prisma.liveStream.findUnique({
+      where: { id },
+      select: { hostId: true },
+    });
+    if (!stream || stream.hostId !== user.id) {
+      return NextResponse.json({ error: "Only the stream host can post frames" }, { status: 403 });
+    }
+
     const body = await request.json();
     const { frame, audio } = body;
 
@@ -68,10 +85,15 @@ export async function POST(
       return NextResponse.json({ error: "Audio chunk too large" }, { status: 413 });
     }
 
+    const existing = frameStore.get(id);
+    const now = Date.now();
+
     frameStore.set(id, {
-      data: frame,
-      audio: (audio && typeof audio === "string") ? audio : undefined,
-      updatedAt: Date.now(),
+      frame,
+      frameUpdatedAt: now,
+      // Only update audio if new audio was provided, otherwise keep existing
+      audio: (audio && typeof audio === "string") ? audio : existing?.audio,
+      audioUpdatedAt: (audio && typeof audio === "string") ? now : (existing?.audioUpdatedAt ?? 0),
     });
 
     return NextResponse.json({ ok: true });

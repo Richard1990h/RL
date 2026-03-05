@@ -114,8 +114,8 @@ export const useUploadStore = create<UploadState>()((set, get) => ({
         set({
           isUploading: false,
           progress: 100,
-          uploadedUrl: result.url,
-          uploadedFileName: file.name,
+          uploadedUrl: result.url || result.path,
+          uploadedFileName: result.queued ? `${file.name} (queued)` : file.name,
           etaSeconds: 0,
           _abort: null,
         });

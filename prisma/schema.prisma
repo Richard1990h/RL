@@ -112,6 +112,14 @@ model User {
   streaksAsUser1 MessageStreak[] @relation("StreakUser1")
   streaksAsUser2 MessageStreak[] @relation("StreakUser2")
 
+  // Stream Whitelist
+  streamWhitelistOwned  StreamWhitelist[] @relation("StreamWhitelistOwner")
+  streamWhitelistEntry  StreamWhitelist[] @relation("StreamWhitelistUser")
+  fivemOwnedServers     FivemServer[]     @relation("FivemServerOwner")
+  fivemMemberships      FivemServerMember[]
+  fivemVipPurchases     FivemServerVipPurchase[]
+  fivemWebsiteSubscriptions FivemWebsiteSubscription[]
+
   // Friends
   sentFriendRequests     FriendRequest[] @relation("FriendRequestSender")
   receivedFriendRequests FriendRequest[] @relation("FriendRequestReceiver")
@@ -119,6 +127,10 @@ model User {
   friendshipsAsUser2     Friendship[]    @relation("FriendshipUser2")
   friendTimeoutsAsOwner  FriendTimeout[] @relation("FriendTimeoutOwner")
   friendTimeoutsAsTarget FriendTimeout[] @relation("FriendTimeoutTarget")
+
+  // Battle invitations
+  sentBattleInvites      BattleInvitation[] @relation("SentBattleInvites")
+  receivedBattleInvites  BattleInvitation[] @relation("ReceivedBattleInvites")
 
   @@index([email])
   @@index([username])
@@ -220,6 +232,10 @@ enum LedgerEntryType {
   AD_REFUND
   AD_IMPRESSION_EARNING
   AD_CREATOR_PAYOUT
+  GAME_GIFT_OUT
+  GAME_GIFT_IN
+  GAME_HOST_CUT
+  GAME_PAYOUT
 }
 
 model CreditLedger {
@@ -551,30 +567,38 @@ model MessageStreak {
 // ──────────────────────────────────────
 
 model LiveStream {
-  id            String   @id @default(uuid())
-  hostId        String
-  title         String
-  tags          Json     @default("[]")
-  viewerCount   Int      @default(0)
-  peakViewers   Int      @default(0)
-  isBattle      Boolean  @default(false)
-  mode          LiveMode @default(STANDARD)
-  status        LiveStatus @default(WAITING)
-  roundTimeSec  Int      @default(0)
-  minDonation   Int      @default(0)
-  bgColor       String?
-  bgImageUrl    String?  @db.Text
-  streamKey     String?  @unique
-  recordingPath String?  @db.Text
-  startedAt     DateTime?
-  endedAt       DateTime?
-  createdAt     DateTime @default(now())
+  id              String   @id @default(uuid())
+  hostId          String
+  title           String
+  tags            Json     @default("[]")
+  viewerCount     Int      @default(0)
+  peakViewers     Int      @default(0)
+  isBattle        Boolean  @default(false)
+  mode            LiveMode @default(STANDARD)
+  status          LiveStatus @default(WAITING)
+  roundTimeSec    Int      @default(0)
+  minDonation     Int      @default(0)
+  hostCutPercent  Int      @default(0)
+  bgColor         String?
+  bgImageUrl      String?  @db.Text
+  streamKey       String?  @unique
+  recordingPath   String?  @db.Text
+  // Team battle settings
+  teamMode        Boolean  @default(false)
+  teamSize        Int      @default(1)  // Players per team (2v2, 3v3, 4v4)
+  // Specific-gift mode: array of tier IDs that count for scoring
+  scoringGiftTiers Json?
+  startedAt       DateTime?
+  endedAt         DateTime?
+  createdAt       DateTime @default(now())
 
-  host         User              @relation(fields: [hostId], references: [id], onDelete: Cascade)
-  participants LiveParticipant[]
-  moderators   Moderator[]
-  chatMessages LiveChatMessage[]
-  recordings   Recording[]
+  host           User              @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  participants   LiveParticipant[]
+  moderators     Moderator[]
+  chatMessages   LiveChatMessage[]
+  recordings     Recording[]
+  powerUps       PowerUp[]
+  battleInvites  BattleInvitation[]
 
   @@index([hostId])
   @@index([status])
@@ -591,6 +615,7 @@ model Recording {
   durationSec   Int             @default(0)
   sizeBytes     BigInt          @default(0)
   status        RecordingStatus @default(PROCESSING)
+  progress      Int             @default(0)
   createdAt     DateTime        @default(now())
 
   liveStream LiveStream @relation(fields: [liveStreamId], references: [id], onDelete: Cascade)
@@ -646,6 +671,8 @@ model LiveParticipant {
   liveStreamId String
   userId       String
   role         ParticipantRole @default(VIEWER)
+  status       ParticipantStatus @default(ACTIVE)
+  team         String?  // "A" or "B" for team battles
   joinedAt     DateTime @default(now())
 
   liveStream LiveStream @relation(fields: [liveStreamId], references: [id], onDelete: Cascade)
@@ -660,6 +687,12 @@ enum ParticipantRole {
   HOST
   GUEST
   VIEWER
+}
+
+enum ParticipantStatus {
+  PENDING
+  ACTIVE
+  REJECTED
 }
 
 model LiveChatMessage {
@@ -954,4 +987,349 @@ enum BugStatus {
   RESOLVED
   FAILED
   DISMISSED
+}
+
+// ──────────────────────────────────────
+// STREAM WHITELIST
+// ──────────────────────────────────────
+
+enum FivemWhitelistDepartment {
+  POLICE
+  EMS
+  FIREFIGHTER
+  JUDGE
+  LAWYER
+}
+
+enum FivemWhitelistStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum FivemServerMemberRole {
+  ADMIN
+  MODERATOR
+  USER
+}
+
+enum FivemServerMemberStatus {
+  ACTIVE
+  PENDING
+  BANNED
+}
+
+model FivemWhitelistApplication {
+  id               String                   @id @default(uuid())
+  displayName      String
+  discordTag       String
+  email            String?
+  age              Int
+  timezone         String
+  department       FivemWhitelistDepartment
+  availability     String                   @db.Text
+  experience       String                   @db.Text
+  scenarioResponse String                   @db.Text
+  motivation       String                   @db.Text
+  knowsRules       Boolean                  @default(false)
+  agreesToPolicy   Boolean                  @default(false)
+  hasWorkingMic    Boolean                  @default(false)
+  status           FivemWhitelistStatus     @default(PENDING)
+  reviewerNotes    String?                  @db.Text
+  reviewedAt       DateTime?
+  reviewedBy       String?
+  ipHash           String?
+  userAgent        String?                  @db.Text
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  @@index([status])
+  @@index([discordTag])
+  @@index([createdAt])
+}
+
+model FivemServer {
+  id                 String             @id @default(uuid())
+  ownerId            String
+  slug               String             @unique
+  name               String
+  websiteName        String
+  summary            String?            @db.Text
+  description        String?            @db.Text
+  logoUrl            String?            @db.Text
+  coverUrl           String?            @db.Text
+  discordInviteUrl   String?            @db.Text
+  discordGuildId     String?
+  discordMemberCount Int                @default(0)
+  onlinePlayers      Int                @default(0)
+  maxPlayers         Int                @default(64)
+  whitelistOpen      Boolean            @default(false)
+  isPublished        Boolean            @default(true)
+  tags               Json?
+  settings           Json?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  owner   User                @relation("FivemServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members FivemServerMember[]
+  jobs    FivemServerJob[]
+  pages   FivemServerPage[]
+  vipPackages FivemServerVipPackage[]
+  vipPurchases FivemServerVipPurchase[]
+  websiteSubscriptions FivemWebsiteSubscription[]
+  bugReports FivemBugReport[]
+  suggestions FivemSuggestion[]
+
+  @@index([ownerId])
+  @@index([isPublished])
+}
+
+model FivemServerMember {
+  id        String                 @id @default(uuid())
+  serverId  String
+  userId    String
+  role      FivemServerMemberRole  @default(USER)
+  status    FivemServerMemberStatus @default(ACTIVE)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  server FivemServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, userId])
+  @@index([userId])
+  @@index([serverId, role])
+}
+
+model FivemServerJob {
+  id            String   @id @default(uuid())
+  serverId      String
+  title         String
+  description   String?  @db.Text
+  whitelistOnly Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  server FivemServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([serverId, isActive])
+}
+
+model FivemServerPage {
+  id        String   @id @default(uuid())
+  serverId  String
+  slug      String
+  title     String
+  content   Json?
+  isVisible Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  server FivemServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, slug])
+  @@index([serverId, sortOrder])
+}
+
+model FivemServerVipPackage {
+  id           String   @id @default(uuid())
+  serverId     String
+  name         String
+  description  String?  @db.Text
+  priceCredits Int
+  durationDays Int      @default(30)
+  benefits     Json?
+  isActive     Boolean  @default(true)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  server FivemServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  purchases FivemServerVipPurchase[]
+
+  @@index([serverId, isActive])
+}
+
+model FivemServerVipPurchase {
+  id           String   @id @default(uuid())
+  serverId     String
+  packageId    String
+  userId       String
+  creditsPaid  Int
+  startsAt     DateTime @default(now())
+  expiresAt    DateTime
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now())
+
+  server  FivemServer            @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  package FivemServerVipPackage  @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  user    User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([serverId, userId, status])
+  @@index([packageId])
+}
+
+model FivemWebsiteSubscription {
+  id              String   @id @default(uuid())
+  userId          String
+  serverId        String   @unique
+  status          String   @default("ACTIVE")
+  amountCents     Int
+  billingPeriod   String   @default("MONTHLY")
+  paypalOrderId   String?
+  paypalCaptureId String?
+  startedAt       DateTime @default(now())
+  nextBillingAt   DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  server FivemServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([nextBillingAt])
+}
+
+model StreamWhitelist {
+  id            String   @id @default(uuid())
+  userId        String   // the streamer who owns this whitelist
+  whitelistedId String   // the user being whitelisted
+  createdAt     DateTime @default(now())
+
+  user        User @relation("StreamWhitelistOwner", fields: [userId], references: [id], onDelete: Cascade)
+  whitelisted User @relation("StreamWhitelistUser", fields: [whitelistedId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, whitelistedId])
+  @@index([userId])
+}
+
+// ──────────────────────────────────────
+// POWER-UPS
+// ──────────────────────────────────────
+
+enum PowerUpType {
+  BOOSTING_GLOVE    // 5x score multiplier
+  MAGIC_MIST        // Hide opponent's score
+  STUN_HAMMER       // Visual distortion effect
+  TIME_MAKER        // Add time to timer
+}
+
+model PowerUp {
+  id          String      @id @default(uuid())
+  streamId    String
+  userId      String
+  targetId    String?     // Player affected (null for stream-wide effects like TIME_MAKER)
+  type        PowerUpType
+  costCredits Int
+  activatedAt DateTime    @default(now())
+  expiresAt   DateTime?   // null for instant effects
+
+  liveStream  LiveStream  @relation(fields: [streamId], references: [id], onDelete: Cascade)
+
+  @@index([streamId])
+  @@index([userId])
+  @@index([streamId, type])
+}
+
+// ──────────────────────────────────────
+// BATTLE INVITATIONS
+// ──────────────────────────────────────
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+model BattleInvitation {
+  id          String       @id @default(uuid())
+  streamId    String
+  senderId    String
+  receiverId  String
+  status      InviteStatus @default(PENDING)
+  message     String?      @db.Text
+  expiresAt   DateTime
+  createdAt   DateTime     @default(now())
+
+  liveStream  LiveStream   @relation(fields: [streamId], references: [id], onDelete: Cascade)
+  sender      User         @relation("SentBattleInvites", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver    User         @relation("ReceivedBattleInvites", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([receiverId, status])
+  @@index([senderId])
+  @@index([streamId])
+}
+
+// ──────────────────────────────────────
+// FIVEM BUG REPORTS (in-game)
+// ──────────────────────────────────────
+
+model FivemBugReport {
+  id            String   @id @default(uuid())
+  serverId      String
+  playerName    String
+  playerId      String?
+  title         String
+  description   String   @db.Text
+  stepsToRepro  String   @db.Text
+  expected      String?  @db.Text
+  severity      String   @default("MEDIUM")
+  status        String   @default("OPEN")
+  location      String?
+  adminNotes    String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  server FivemServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([serverId, status])
+  @@index([createdAt])
+}
+
+// ──────────────────────────────────────
+// FIVEM SUGGESTIONS (in-game)
+// ──────────────────────────────────────
+
+model FivemSuggestion {
+  id            String   @id @default(uuid())
+  serverId      String
+  playerName    String
+  playerId      String?
+  title         String
+  description   String   @db.Text
+  howItWorks    String   @db.Text
+  whyItsGood    String?  @db.Text
+  priority      String   @default("NICE_TO_HAVE")
+  status        String   @default("NEW")
+  adminNotes    String?  @db.Text
+  votes         Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  server FivemServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([serverId, status])
+  @@index([createdAt])
+}
+
+// ──────────────────────────────────────
+// FIVEM ADMIN COMMENTS (on bugs/suggestions)
+// ──────────────────────────────────────
+
+model FivemAdminComment {
+  id          String   @id @default(uuid())
+  serverId    String
+  targetType  String   // "BUG" or "SUGGESTION"
+  targetId    String   // bug or suggestion ID
+  authorName  String
+  authorId    String
+  text        String   @db.Text
+  createdAt   DateTime @default(now())
+
+  @@index([serverId, targetType, targetId])
+  @@index([createdAt])
 }

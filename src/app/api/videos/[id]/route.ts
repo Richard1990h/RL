@@ -105,11 +105,7 @@ export async function GET(
         })
       : Promise.resolve(null);
 
-    // Fire view increment without awaiting — it's not needed for the response
-    prisma.video.update({
-      where: { id },
-      data: { views: { increment: 1 } },
-    }).catch(() => {});
+    // View counting is handled by the dedicated /api/videos/[id]/view endpoint
 
     const like = await likePromise;
     const userLike = like ? (like.isLike ? "like" : "dislike") : null;
@@ -118,7 +114,7 @@ export async function GET(
       video: {
         ...video,
         tags: normalizeTags(video.tags),
-        views: video.views + 1,
+        views: video.views,
         userLike,
       },
     });

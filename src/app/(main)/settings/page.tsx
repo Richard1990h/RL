@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState, useCallback, useEffect, useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Moon,
   Sun,
@@ -26,10 +26,14 @@ import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import Avatar from "@/components/ui/Avatar";
 import SegmentedControl from "@/components/ui/SegmentedControl";
+import Tabs from "@/components/ui/Tabs";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import CreatorStudioPage from "../creator-studio/page";
+import AnalyticsPage from "../analytics/page";
+import MessagesPage from "../messages/page";
 
 // ── Default preferences shape ──
 interface Preferences {
@@ -62,11 +66,27 @@ const DEFAULT_PREFS: Preferences = {
   saveVODs: true,
 };
 
-export default function SettingsPage() {
+type SettingsMainTab = "settings" | "messages" | "creator-studio" | "analytics";
+
+const SETTINGS_MAIN_TABS = [
+  { id: "settings", label: "Settings" },
+  { id: "messages", label: "Messages" },
+  { id: "creator-studio", label: "Creator Studio" },
+  { id: "analytics", label: "Analytics" },
+];
+
+function SettingsPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const currentUser = useAuthStore((s) => s.currentUser);
   const setUser = useAuthStore((s) => s.setUser);
   const logout = useAuthStore((s) => s.logout);
+  const tabParam = searchParams.get("tab");
+  const initialTab: SettingsMainTab =
+    tabParam === "messages" || tabParam === "creator-studio" || tabParam === "analytics"
+      ? tabParam
+      : "settings";
+  const [activeMainTab, setActiveMainTab] = useState<SettingsMainTab>(initialTab);
 
   // Account form state
   const [displayName, setDisplayName] = useState(currentUser?.displayName ?? "");
@@ -415,10 +435,50 @@ export default function SettingsPage() {
     }
   }, [currentUser, logout, router]);
 
-  return (
-    <div className="max-w-3xl mx-auto px-4 py-6 space-y-8">
-      <h1 className="text-2xl font-bold text-text">Settings</h1>
+  useEffect(() => {
+    const nextTab: SettingsMainTab =
+      tabParam === "messages" || tabParam === "creator-studio" || tabParam === "analytics"
+        ? tabParam
+        : "settings";
+    setActiveMainTab(nextTab);
+  }, [tabParam]);
 
+  const handleMainTabChange = useCallback((id: string) => {
+    const next = id as SettingsMainTab;
+    setActiveMainTab(next);
+    if (next === "settings") {
+      router.replace("/settings");
+    } else {
+      router.replace(`/settings?tab=${next}`);
+    }
+  }, [router]);
+
+  return (
+    <div className={cn(
+      "mx-auto px-4 py-6 space-y-8",
+      activeMainTab === "settings" ? "max-w-3xl" : "max-w-6xl"
+    )}>
+      <h1 className="text-2xl font-bold text-text">Settings</h1>
+      <Tabs
+        tabs={SETTINGS_MAIN_TABS}
+        activeTab={activeMainTab}
+        onChange={handleMainTabChange}
+      />
+
+      {activeMainTab === "creator-studio" && (
+        <CreatorStudioPage />
+      )}
+
+      {activeMainTab === "analytics" && (
+        <AnalyticsPage />
+      )}
+
+      {activeMainTab === "messages" && (
+        <MessagesPage />
+      )}
+
+      {activeMainTab === "settings" && (
+        <>
       {/* Account */}
       <Card padding="lg">
         <h2 className="text-lg font-semibold text-text mb-6">Account</h2>
@@ -1067,7 +1127,17 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
+        </>
+      )}
     </div>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={<div className="px-4 py-8 text-sm text-text-secondary">Loading settings...</div>}>
+      <SettingsPageContent />
+    </Suspense>
   );
 }
 

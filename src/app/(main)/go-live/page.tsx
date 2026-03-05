@@ -76,6 +76,10 @@ import VideoTile from "@/components/live/VideoTile";
 import NetworkIndicator from "@/components/live/NetworkIndicator";
 import RecordingIndicator from "@/components/live/RecordingIndicator";
 import DonationAlert, { useDonationAlertQueue, type DonationAlertData } from "@/components/live/DonationAlert";
+import BattleBar from "@/components/battle/BattleBar";
+import SplitScreenBattle, { SplitScreenBattleCompact } from "@/components/battle/SplitScreenBattle";
+import TeamBattleLayout, { TeamBattleCompact } from "@/components/battle/TeamBattleLayout";
+import InviteBattleModal from "@/components/battle/InviteBattleModal";
 import { useAuthStore } from "@/stores/auth-store";
 import { useStreamStore } from "@/stores/stream-store";
 import { useBroadcastStore } from "@/stores/broadcast-store";
@@ -84,6 +88,7 @@ import { getUserMediaStream, stopStream, setTrackEnabled, getScreenStream } from
 import { MediaRecorderManager } from "@/lib/recording/media-recorder-manager";
 import { ChunkUploader } from "@/lib/recording/chunk-uploader";
 import { api } from "@/lib/api";
+import { useStreamlabs } from "@/hooks/useStreamlabs";
 import { cn, formatCurrency, formatCredits } from "@/lib/utils";
 import type { User } from "@/lib/types";
 
@@ -272,9 +277,12 @@ function ParticipantBox({
   cameraActive,
   isSmall,
   onDonate,
+  onKick,
   background,
   showWinner,
   score,
+  stream,
+  speaking,
 }: {
   user: User;
   isHost?: boolean;
@@ -283,31 +291,61 @@ function ParticipantBox({
   cameraActive?: boolean;
   isSmall?: boolean;
   onDonate?: () => void;
+  onKick?: () => void;
   background?: string;
   showWinner?: boolean;
   score?: number;
+  stream?: MediaStream | null;
+  speaking?: boolean;
 }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (stream && cameraActive) {
+      video.srcObject = stream;
+    } else {
+      video.srcObject = null;
+    }
+  }, [stream, cameraActive]);
+
   return (
     <div className={cn("flex flex-col gap-1.5 group/tile", isSmall && "w-28")}>
       <div
         className={cn(
-          "relative rounded-2xl border border-border/60 overflow-hidden flex items-center justify-center",
+          "relative rounded-2xl overflow-hidden flex items-center justify-center",
           "bg-gradient-to-br from-bg-surface2 to-bg-surface3",
-          "transition-all duration-200 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5",
-          isSmall ? "h-20" : "aspect-video"
+          "transition-all duration-200 hover:shadow-lg hover:shadow-primary/5",
+          isSmall ? "h-20" : "aspect-video",
+          speaking
+            ? "border-2 border-success shadow-lg shadow-success/30"
+            : "border border-border/60 hover:border-primary/40"
         )}
         style={{ background: background || undefined }}
       >
-        {/* Avatar placeholder */}
-        <img
-          src={user.avatarUrl ?? undefined}
-          alt={user.displayName}
-          className={cn(
-            "rounded-full border-2 transition-transform duration-200 group-hover/tile:scale-105",
-            isHost ? "border-warning/60" : "border-primary/30",
-            isSmall ? "w-10 h-10" : "w-16 h-16"
-          )}
-        />
+        {/* Video stream when available and camera is on */}
+        {stream && cameraActive ? (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover"
+            style={{ transform: "scaleX(-1)" }}
+          />
+        ) : (
+          /* Avatar fallback */
+          <img
+            src={user.avatarUrl ?? undefined}
+            alt={user.displayName}
+            className={cn(
+              "rounded-full border-2 transition-transform duration-200 group-hover/tile:scale-105",
+              isHost ? "border-warning/60" : "border-primary/30",
+              isSmall ? "w-10 h-10" : "w-16 h-16"
+            )}
+          />
+        )}
 
         {/* Host badge */}
         {isHost && (
@@ -346,6 +384,19 @@ function ParticipantBox({
         {score !== undefined && (
           <div className="absolute bottom-2 left-2 px-2 py-0.5 bg-black/70 text-text text-xs font-bold rounded-full backdrop-blur-sm">
             {score} pts
+          </div>
+        )}
+
+        {/* Kick button on hover (non-host only) */}
+        {onKick && !isHost && (
+          <div className="absolute top-2 right-2 opacity-0 group-hover/tile:opacity-100 transition-opacity">
+            <button
+              onClick={(e) => { e.stopPropagation(); onKick(); }}
+              className="p-1.5 bg-danger/80 text-white rounded-full hover:bg-danger transition-colors"
+              title="Kick from Room"
+            >
+              <UserMinus size={12} />
+            </button>
           </div>
         )}
       </div>
@@ -393,7 +444,7 @@ function RevenueSplitCard({ mode, totalDonations }: { mode: StreamMode; totalDon
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-export default function GoLivePage() {
+export default function GoLivePage(): JSX.Element {
   const router = useRouter();
   const { currentUser } = useAuthStore();
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -583,72 +634,214 @@ export default function GoLivePage() {
   const [bannedWordsInput, setBannedWordsInput] = useState("");
   const [bannedWords, setBannedWords] = useState<string[]>([]);
 
+  // Disconnect grace period (seconds) — stream stays alive this long after navigating away
+  const [disconnectTimeout, setDisconnectTimeout] = useState(60);
+  const [disconnectCountdown, setDisconnectCountdown] = useState<number | null>(null);
+  const disconnectTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Battle queue settings
   const [queueCreditCost, setQueueCreditCost] = useState(0);
   const [battleWhitelist, setBattleWhitelist] = useState<string[]>([]);
   const [showBattleTypeModal, setShowBattleTypeModal] = useState(false);
   const [selectedBattleType, setSelectedBattleType] = useState<StreamMode>("timer_wars");
 
+  // Team battle & invite modal
+  const [teamMode, setTeamMode] = useState(false);
+  const [teamSize, setTeamSize] = useState(2); // 2v2, 3v3, etc.
+  const [inviteModalOpen, setInviteModalOpen] = useState(false);
+  const [activePowerUps, setActivePowerUps] = useState<{ type: string; targetId: string; expiresAt: number }[]>([]);
+
+  // Join requests state
+  const [joinRequests, setJoinRequests] = useState<{ id: string; userId: string; displayName: string; avatarUrl: string }[]>([]);
+
+  // Load whitelist from API on mount
+  useEffect(() => {
+    fetch("/api/creator/whitelist", { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.whitelist) {
+          setBattleWhitelist(data.whitelist.map((w: { id: string }) => w.id));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Whitelist add/remove with API persistence
+  const handleAddToWhitelist = useCallback((userId: string) => {
+    if (!userId || battleWhitelist.includes(userId)) return;
+    setBattleWhitelist((prev) => [...prev, userId]);
+    fetch("/api/creator/whitelist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ whitelistedId: userId }),
+    }).catch(() => {});
+  }, [battleWhitelist]);
+
+  const handleRemoveFromWhitelist = useCallback((userId: string) => {
+    setBattleWhitelist((prev) => prev.filter((id) => id !== userId));
+    fetch("/api/creator/whitelist", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ whitelistedId: userId }),
+    }).catch(() => {});
+  }, []);
+
   // Donation alert queue
   const { current: currentDonationAlert, enqueue: enqueueDonationAlert, handleComplete: handleDonationAlertComplete } = useDonationAlertQueue();
   const [donationBorderFlash, setDonationBorderFlash] = useState(false);
+
+  // Streamlabs integration — connect when live, pipe events into donation alerts
+  const enqueueDonationAlertRef = useRef(enqueueDonationAlert);
+  enqueueDonationAlertRef.current = enqueueDonationAlert;
+
+  const { connected: streamlabsConnected } = useStreamlabs({
+    enabled: isLive,
+    onEvent: useCallback((evt) => {
+      if (evt.type === "donation" && evt.amount && evt.amount > 0) {
+        // Convert dollar amount to credits (1 dollar = 100 credits)
+        const creditAmount = Math.round(evt.amount * 100);
+        const tier = (() => {
+          if (creditAmount >= 5000) return { name: "Crown", iconKey: "crown", rarityColor: "#eab308", animationType: "explosion" as const, category: "premium" as const };
+          if (creditAmount >= 1000) return { name: "Bomb", iconKey: "bomb", rarityColor: "#ef4444", animationType: "explosion" as const, category: "premium" as const };
+          if (creditAmount >= 500) return { name: "Fire", iconKey: "fire", rarityColor: "#f97316", animationType: "sparkle" as const, category: "basic" as const };
+          return { name: "Cheer", iconKey: "sparkle", rarityColor: "#60a5fa", animationType: "sparkle" as const, category: "basic" as const };
+        })();
+        enqueueDonationAlertRef.current({
+          id: `sl-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          from: evt.from,
+          avatar: "",
+          tierName: tier.name,
+          tierIcon: tier.iconKey,
+          amount: creditAmount,
+          rarityColor: tier.rarityColor,
+          animationType: tier.animationType,
+          category: tier.category,
+        });
+        setDonationBorderFlash(true);
+        setTimeout(() => setDonationBorderFlash(false), 2000);
+        setTotalDonations((t) => t + creditAmount);
+      }
+    }, []),
+  });
 
   // Friends online status (derived from fetched users)
   const [friendsOnline, setFriendsOnline] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     const map: Record<string, boolean> = {};
-    allUsers.forEach((u, i) => {
-      map[u.id] = i < 7; // first 7 are online
+    allUsers.forEach((u) => {
+      const lastActive = (u as unknown as Record<string, unknown>).lastActiveAt ? new Date((u as unknown as Record<string, unknown>).lastActiveAt as string).getTime() : 0;
+      map[u.id] = Date.now() - lastActive < 5 * 60 * 1000; // online if active in last 5 min
     });
     setFriendsOnline(map);
   }, [allUsers]);
 
-  // Load saved stream settings from localStorage on mount
+  // Load settings from API on mount (with localStorage as offline fallback)
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem("rally_stream_settings");
-      if (saved) {
-        const s = JSON.parse(saved);
-        if (s.blockLinks !== undefined) setBlockLinks(s.blockLinks);
-        if (s.slowMode) setSlowMode(s.slowMode);
-        if (s.followersOnly !== undefined) setFollowersOnly(s.followersOnly);
-        if (s.subscriberOnly !== undefined) setSubscriberOnly(s.subscriberOnly);
-        if (s.bannedWords) { setBannedWords(s.bannedWords); setBannedWordsInput(s.bannedWords.join(", ")); }
-        if (s.minCreditsToChat) setMinCreditsToChat(s.minCreditsToChat);
-        if (s.minCreditsToJoin) setMinCreditsToJoin(s.minCreditsToJoin);
-        if (s.adFrequency) setAdFrequency(s.adFrequency);
-        if (s.donationSkipEnabled !== undefined) setDonationSkipEnabled(s.donationSkipEnabled);
-        if (s.donationSkipAmount) setDonationSkipAmount(s.donationSkipAmount);
-        if (s.cameraOffImage) setCameraOffImage(s.cameraOffImage);
-        if (s.muteImage) setMuteImage(s.muteImage);
-        if (s.queueCreditCost !== undefined) setQueueCreditCost(s.queueCreditCost);
-      }
-    } catch {}
+    let cancelled = false;
+    const loadSettings = async () => {
+      try {
+        const res = await fetch("/api/creator/live-settings", { credentials: "include" });
+        if (res.ok) {
+          const data = await res.json();
+          const s = data.liveSettings || {};
+          if (!cancelled) {
+            if (s.blockLinks !== undefined) setBlockLinks(s.blockLinks);
+            if (s.slowMode) setSlowMode(s.slowMode);
+            if (s.followersOnly !== undefined) setFollowersOnly(s.followersOnly);
+            if (s.subscriberOnly !== undefined) setSubscriberOnly(s.subscriberOnly);
+            if (s.bannedWords) { setBannedWords(s.bannedWords); setBannedWordsInput(s.bannedWords.join(", ")); }
+            if (s.minCreditsToChat) setMinCreditsToChat(s.minCreditsToChat);
+            if (s.minCreditsToJoin) setMinCreditsToJoin(s.minCreditsToJoin);
+            if (s.adFrequency) setAdFrequency(s.adFrequency);
+            if (s.donationSkipEnabled !== undefined) setDonationSkipEnabled(s.donationSkipEnabled);
+            if (s.donationSkipAmount) setDonationSkipAmount(s.donationSkipAmount);
+            if (s.cameraOffImage) setCameraOffImage(s.cameraOffImage);
+            if (s.muteImage) setMuteImage(s.muteImage);
+            if (s.queueCreditCost !== undefined) setQueueCreditCost(s.queueCreditCost);
+            if (s.streamTitle) setTitle(s.streamTitle);
+            if (s.tags) setTags(s.tags);
+            if (s.mode) setMode(s.mode as StreamMode);
+            if (s.guestLimit) setGuestLimit(s.guestLimit);
+            if (s.roundLength) setRoundLength(s.roundLength);
+            if (s.bgColor) setSelectedBg(s.bgColor);
+            if (s.disconnectTimeout) setDisconnectTimeout(s.disconnectTimeout);
+          }
+          return;
+        }
+      } catch {}
+      // Offline fallback: try localStorage
+      if (cancelled) return;
+      try {
+        const saved = localStorage.getItem("rally_stream_settings");
+        if (saved) {
+          const s = JSON.parse(saved);
+          if (s.blockLinks !== undefined) setBlockLinks(s.blockLinks);
+          if (s.slowMode) setSlowMode(s.slowMode);
+          if (s.followersOnly !== undefined) setFollowersOnly(s.followersOnly);
+          if (s.subscriberOnly !== undefined) setSubscriberOnly(s.subscriberOnly);
+          if (s.bannedWords) { setBannedWords(s.bannedWords); setBannedWordsInput(s.bannedWords.join(", ")); }
+          if (s.minCreditsToChat) setMinCreditsToChat(s.minCreditsToChat);
+          if (s.minCreditsToJoin) setMinCreditsToJoin(s.minCreditsToJoin);
+          if (s.adFrequency) setAdFrequency(s.adFrequency);
+          if (s.donationSkipEnabled !== undefined) setDonationSkipEnabled(s.donationSkipEnabled);
+          if (s.donationSkipAmount) setDonationSkipAmount(s.donationSkipAmount);
+          if (s.cameraOffImage) setCameraOffImage(s.cameraOffImage);
+          if (s.muteImage) setMuteImage(s.muteImage);
+          if (s.queueCreditCost !== undefined) setQueueCreditCost(s.queueCreditCost);
+        }
+      } catch {}
+    };
+    loadSettings();
+    return () => { cancelled = true; };
   }, []);
 
-  // Save stream settings to localStorage when they change
+  // Debounced save to API + localStorage fallback when settings change
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
+    // Save to localStorage immediately as offline fallback
     try {
       localStorage.setItem("rally_stream_settings", JSON.stringify({
-        blockLinks,
-        slowMode,
-        followersOnly,
-        subscriberOnly,
-        bannedWords,
-        minCreditsToChat,
-        minCreditsToJoin,
-        adFrequency,
-        donationSkipEnabled,
-        donationSkipAmount,
-        cameraOffImage,
-        muteImage,
-        queueCreditCost,
+        blockLinks, slowMode, followersOnly, subscriberOnly, bannedWords,
+        minCreditsToChat, minCreditsToJoin, adFrequency, donationSkipEnabled,
+        donationSkipAmount, cameraOffImage, muteImage, queueCreditCost,
       }));
     } catch {}
-  }, [blockLinks, slowMode, followersOnly, subscriberOnly, bannedWords, minCreditsToChat, minCreditsToJoin, adFrequency, donationSkipEnabled, donationSkipAmount, cameraOffImage, muteImage, queueCreditCost]);
+
+    // Debounced API save (1 second delay)
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      fetch("/api/creator/live-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          blockLinks, slowMode, followersOnly, subscriberOnly, bannedWords,
+          minCreditsToChat, minCreditsToJoin, adFrequency, donationSkipEnabled,
+          donationSkipAmount, cameraOffImage, muteImage, queueCreditCost,
+          streamTitle: title, tags, mode, guestLimit, roundLength,
+          bgColor: selectedBg, disconnectTimeout,
+        }),
+      }).catch(() => {});
+    }, 1000);
+
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [blockLinks, slowMode, followersOnly, subscriberOnly, bannedWords, minCreditsToChat, minCreditsToJoin, adFrequency, donationSkipEnabled, donationSkipAmount, cameraOffImage, muteImage, queueCreditCost, title, tags, mode, guestLimit, roundLength, selectedBg, disconnectTimeout]);
 
   // ─── Effects ─────────────────────────────────────────────────────────────
+
+  // Auto-select layout based on guest limit
+  useEffect(() => {
+    if (guestLimit <= 1) setSelectedLayout("1x1");
+    else if (guestLimit <= 2) setSelectedLayout("2x1");
+    else if (guestLimit <= 4) setSelectedLayout("2x2");
+    else if (guestLimit <= 6) setSelectedLayout("3x2");
+    else setSelectedLayout("2x5");
+  }, [guestLimit]);
 
   // Acquire camera/mic when entering preview or setup with camera on
   useEffect(() => {
@@ -822,6 +1015,57 @@ export default function GoLivePage() {
     return () => clearInterval(interval);
   }, [isLive]);
 
+  // Disconnect grace period — keep stream alive when streamer navigates away
+  useEffect(() => {
+    if (!isLive) return;
+
+    // Warn before closing tab/window
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "Your stream is still live! Are you sure you want to leave?";
+    };
+
+    // Start/stop countdown when tab visibility changes
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Tab went hidden — start countdown
+        let remaining = disconnectTimeout;
+        setDisconnectCountdown(remaining);
+        disconnectTimerRef.current = setInterval(() => {
+          remaining -= 1;
+          setDisconnectCountdown(remaining);
+          if (remaining <= 0) {
+            // Time's up — end the stream
+            if (disconnectTimerRef.current) clearInterval(disconnectTimerRef.current);
+            disconnectTimerRef.current = null;
+            handleEndStream();
+          }
+        }, 1000);
+      } else {
+        // Tab came back — cancel countdown
+        if (disconnectTimerRef.current) {
+          clearInterval(disconnectTimerRef.current);
+          disconnectTimerRef.current = null;
+        }
+        setDisconnectCountdown(null);
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (disconnectTimerRef.current) {
+        clearInterval(disconnectTimerRef.current);
+        disconnectTimerRef.current = null;
+      }
+      setDisconnectCountdown(null);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLive, disconnectTimeout]);
+
   // Capture and upload video frames + audio every 2 seconds for viewers
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRecorderRef = useRef<MediaRecorder | null>(null);
@@ -830,50 +1074,107 @@ export default function GoLivePage() {
   const donationAlertRef = useRef<DonationAlertData | null>(null);
   useEffect(() => { donationAlertRef.current = currentDonationAlert; }, [currentDonationAlert]);
 
-  // Audio recording: continuously capture short audio chunks
+  // Audio recording: capture complete WebM audio chunks every 2 seconds
+  // Uses stop/restart pattern so each chunk is an independently playable WebM file
+  // Mixes mic (localStream) + desktop audio (screenStream) when screen sharing
+  const audioIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioMixCtxRef = useRef<AudioContext | null>(null);
   useEffect(() => {
-    if (!isLive || !broadcastStreamId || !micOn || !localStream) {
+    const hasMic = micOn && localStream && localStream.getAudioTracks().length > 0;
+    const hasScreenAudio = screenSharing && screenStream && screenStream.getAudioTracks().length > 0;
+
+    if (!isLive || !broadcastStreamId || (!hasMic && !hasScreenAudio)) {
       if (audioRecorderRef.current && audioRecorderRef.current.state !== "inactive") {
         audioRecorderRef.current.stop();
       }
       audioRecorderRef.current = null;
       latestAudioChunkRef.current = null;
+      if (audioIntervalRef.current) {
+        clearInterval(audioIntervalRef.current);
+        audioIntervalRef.current = null;
+      }
+      if (audioMixCtxRef.current) {
+        audioMixCtxRef.current.close().catch(() => {});
+        audioMixCtxRef.current = null;
+      }
       return;
     }
 
-    const audioTracks = localStream.getAudioTracks();
-    if (audioTracks.length === 0) return;
-
-    const audioStream = new MediaStream(audioTracks);
-    try {
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : "audio/webm";
-      const recorder = new MediaRecorder(audioStream, { mimeType, audioBitsPerSecond: 32000 });
-      audioRecorderRef.current = recorder;
-
-      recorder.ondataavailable = async (e) => {
-        if (e.data.size > 0) {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const result = reader.result as string;
-            const base64 = result.split(",")[1];
-            if (base64) latestAudioChunkRef.current = base64;
-          };
-          reader.readAsDataURL(e.data);
-        }
-      };
-
-      // Record in 2-second slices
-      recorder.start(2000);
-
-      return () => {
-        if (recorder.state !== "inactive") recorder.stop();
-      };
-    } catch {
-      // MediaRecorder not supported for audio
+    // Mix all available audio sources (mic + desktop) into a single stream
+    let audioStream: MediaStream;
+    if (hasMic && hasScreenAudio) {
+      const ctx = new AudioContext();
+      audioMixCtxRef.current = ctx;
+      const dest = ctx.createMediaStreamDestination();
+      localStream!.getAudioTracks().forEach((track) => {
+        ctx.createMediaStreamSource(new MediaStream([track])).connect(dest);
+      });
+      screenStream!.getAudioTracks().forEach((track) => {
+        ctx.createMediaStreamSource(new MediaStream([track])).connect(dest);
+      });
+      audioStream = dest.stream;
+    } else if (hasScreenAudio) {
+      audioStream = new MediaStream(screenStream!.getAudioTracks());
+    } else {
+      audioStream = new MediaStream(localStream!.getAudioTracks());
     }
-  }, [isLive, broadcastStreamId, micOn, localStream]);
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : "audio/webm";
+
+    let stopped = false;
+
+    const startRecorder = () => {
+      if (stopped) return;
+      try {
+        const recorder = new MediaRecorder(audioStream, { mimeType, audioBitsPerSecond: 32000 });
+        audioRecorderRef.current = recorder;
+
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const result = reader.result as string;
+              const base64 = result.split(",")[1];
+              if (base64) latestAudioChunkRef.current = base64;
+            };
+            reader.readAsDataURL(e.data);
+          }
+        };
+
+        recorder.start(); // No timeslice — produces complete WebM on stop
+      } catch {
+        // MediaRecorder not supported
+      }
+    };
+
+    // Start first recorder immediately
+    startRecorder();
+
+    // Every 1.5s: stop current (triggers ondataavailable with complete WebM), start new
+    // Audio chunks need to be long enough for smooth playback — 500ms causes stuttering
+    audioIntervalRef.current = setInterval(() => {
+      if (audioRecorderRef.current && audioRecorderRef.current.state === "recording") {
+        audioRecorderRef.current.stop();
+      }
+      startRecorder();
+    }, 1500);
+
+    return () => {
+      stopped = true;
+      if (audioIntervalRef.current) {
+        clearInterval(audioIntervalRef.current);
+        audioIntervalRef.current = null;
+      }
+      if (audioRecorderRef.current && audioRecorderRef.current.state !== "inactive") {
+        audioRecorderRef.current.stop();
+      }
+      if (audioMixCtxRef.current) {
+        audioMixCtxRef.current.close().catch(() => {});
+        audioMixCtxRef.current = null;
+      }
+    };
+  }, [isLive, broadcastStreamId, micOn, localStream, screenSharing, screenStream]);
 
   useEffect(() => {
     if (!isLive || !broadcastStreamId) return;
@@ -891,9 +1192,8 @@ export default function GoLivePage() {
       const videoTrack = stream.getVideoTracks()[0];
       if (!videoTrack || !videoTrack.enabled) return;
 
-      // Grab latest audio chunk (will be null if no audio)
+      // Grab latest audio chunk (keep it in ref so it's not lost between cycles)
       const audioChunk = latestAudioChunkRef.current;
-      latestAudioChunkRef.current = null;
 
       try {
         // Use ImageCapture API if available, otherwise use video element
@@ -953,25 +1253,40 @@ export default function GoLivePage() {
       }
     };
 
-    // Capture first frame immediately, then every 2 seconds
+    // Capture first frame immediately, then every 500ms
     captureAndUpload();
-    const interval = setInterval(captureAndUpload, 2000);
+    const interval = setInterval(captureAndUpload, 500);
     return () => clearInterval(interval);
   }, [isLive, broadcastStreamId, localStream, screenStream, screenSharing]);
 
-  // Poll viewer count from API every 5 seconds when live
+  // Poll viewer count and join requests from API every 5 seconds when live
   useEffect(() => {
     if (!isLive || !broadcastStreamId) return;
-    const fetchViewerCount = async () => {
+    const fetchStreamData = async () => {
       try {
         const res = await api.live.get(broadcastStreamId) as { liveStream?: { viewerCount?: number } };
         if (res.liveStream?.viewerCount !== undefined) {
           setViewerCount(res.liveStream.viewerCount);
         }
       } catch {}
+      // Fetch pending join requests
+      try {
+        const res = await fetch(`/api/live/${broadcastStreamId}/approve`, { credentials: "include" });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.requests) {
+            setJoinRequests(data.requests.map((r: { id: string; user: { id: string; displayName: string; avatarUrl: string | null } }) => ({
+              id: r.id,
+              userId: r.user.id,
+              displayName: r.user.displayName,
+              avatarUrl: r.user.avatarUrl || "",
+            })));
+          }
+        }
+      } catch {}
     };
-    fetchViewerCount();
-    const interval = setInterval(fetchViewerCount, 5000);
+    fetchStreamData();
+    const interval = setInterval(fetchStreamData, 5000);
     return () => clearInterval(interval);
   }, [isLive, broadcastStreamId]);
 
@@ -1090,7 +1405,8 @@ export default function GoLivePage() {
         mode: mode.toUpperCase(),
         isBattle,
         guestLimit,
-        roundLength: mode === "rooms" ? undefined : roundLength,
+        roundTimeSec: mode === "rooms" ? undefined : roundLength,
+        hostCutPercent: hostCut,
         cameraOn,
         micOn,
       });
@@ -1099,7 +1415,8 @@ export default function GoLivePage() {
         setBroadcastStreamId(data.liveStream.id);
       }
     } catch (err) {
-      setError("Failed to start stream. Please check your connection and try again.");
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message || "Failed to start stream. Please check your connection and try again.");
       setStage("setup");
       return;
     }
@@ -1107,6 +1424,32 @@ export default function GoLivePage() {
     setIsLive(true);
     setStage("live");
     setViewerCount(0);
+
+    // Auto-start recording using camera/mic stream (no screen picker needed)
+    if (localStream) {
+      try {
+        const uploadId = `rec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        recordingStore.setUploadId(uploadId);
+
+        const uploader = new ChunkUploader({
+          uploadId,
+          onProgress: (uploaded, total) => recordingStore.setChunksProgress(uploaded, total),
+          onError: (err) => recordingStore.setError(err),
+        });
+        uploaderRef.current = uploader;
+
+        const recorder = new MediaRecorderManager({
+          onChunk: (chunk) => uploader.enqueue(chunk),
+          onStateChange: (state) => recordingStore.setState(state),
+          onError: (err) => recordingStore.setError(err),
+          onDurationUpdate: (seconds) => recordingStore.setDuration(seconds),
+        });
+        recorderRef.current = recorder;
+        recorder.start(localStream);
+      } catch {
+        // Auto-recording failed — non-fatal, stream still works
+      }
+    }
 
     // Initialize queue / rooms
     const shuffled = shuffleArray(allUsers.filter((u) => u.id !== currentUser?.id));
@@ -1119,14 +1462,18 @@ export default function GoLivePage() {
   };
 
   const handleEndStream = async () => {
-    // Stop recording if active
+    // Finalize recording if active (uploads remaining chunks, creates DB record, triggers processing)
     if (recorderRef.current?.state === "recording" || recorderRef.current?.state === "paused") {
-      recorderRef.current.stop();
+      await handleStopRecording();
     }
-    // Stop screen share
+    // Stop camera, mic, and screen share
+    stopStream(localStream);
+    setLocalStream(null);
     stopStream(screenStream);
     setScreenStream(null);
     setScreenSharing(false);
+    setCameraOn(false);
+    setMicOn(false);
 
     // End stream in database and wait for it to complete
     if (broadcastStreamId) {
@@ -1153,8 +1500,8 @@ export default function GoLivePage() {
     recordingStore.reset();
     resetBroadcast();
 
-    // Navigate away from go-live page after stream ends
-    router.push("/live");
+    // Navigate to creator studio so streamer can see their recording
+    router.push("/creator-studio");
   };
 
   const handleToggleScreenShare = async () => {
@@ -1178,10 +1525,7 @@ export default function GoLivePage() {
     }
   };
 
-  const handleStartRecording = () => {
-    const stream = localStream;
-    if (!stream) return;
-
+  const handleStartRecording = async () => {
     const uploadId = `rec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     recordingStore.setUploadId(uploadId);
 
@@ -1199,15 +1543,58 @@ export default function GoLivePage() {
       onDurationUpdate: (seconds) => recordingStore.setDuration(seconds),
     });
     recorderRef.current = recorder;
-    recorder.start(stream);
+
+    try {
+      // Capture entire screen/tab for full-screen recording
+      const screenCapture = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: "browser" } as MediaTrackConstraints,
+        audio: true,
+      });
+
+      // Mix audio: local mic + screen audio
+      const audioCtx = new AudioContext();
+      const dest = audioCtx.createMediaStreamDestination();
+      let hasAudio = false;
+
+      if (localStream) {
+        localStream.getAudioTracks().forEach(track => {
+          const source = audioCtx.createMediaStreamSource(new MediaStream([track]));
+          source.connect(dest);
+          hasAudio = true;
+        });
+      }
+      screenCapture.getAudioTracks().forEach(track => {
+        const source = audioCtx.createMediaStreamSource(new MediaStream([track]));
+        source.connect(dest);
+        hasAudio = true;
+      });
+
+      // Combine screen video + mixed audio
+      const combined = new MediaStream([
+        ...screenCapture.getVideoTracks(),
+        ...(hasAudio ? dest.stream.getAudioTracks() : []),
+      ]);
+
+      // Stop recording when screen share ends
+      screenCapture.getVideoTracks()[0]?.addEventListener("ended", () => {
+        handleStopRecording();
+      });
+
+      recorder.start(combined);
+    } catch {
+      // User cancelled screen picker or not supported — fall back to camera stream
+      if (localStream) {
+        recorder.start(localStream);
+      }
+    }
   };
 
   const handleStopRecording = async () => {
     recorderRef.current?.stop();
-    // Finalize upload
-    const result = await uploaderRef.current?.finalize(recordingStore.chunksUploaded + 1);
-    if (result && broadcastStreamId) {
-      // Create recording record
+
+    // Create the recording record immediately so we can track progress
+    let recId: string | null = null;
+    if (broadcastStreamId) {
       try {
         const res = await fetch("/api/recordings", {
           method: "POST",
@@ -1216,21 +1603,67 @@ export default function GoLivePage() {
           body: JSON.stringify({
             liveStreamId: broadcastStreamId,
             title: `${title} - Recording`,
-            filePath: result.path,
+            filePath: "",
           }),
         });
         if (res.ok) {
           const data = await res.json();
-          recordingStore.setRecordingId(data.recording.id);
-          // Trigger processing
-          fetch(`/api/recordings/${data.recording.id}/process`, {
-            method: "POST",
-            credentials: "include",
-          }).catch(() => {});
+          recId = data.recording.id;
+          recordingStore.setRecordingId(recId!);
         }
-      } catch {
-        // Recording saved but record creation failed
-      }
+      } catch {}
+    }
+
+    // Update progress as chunks finalize
+    const updateProgress = async (pct: number) => {
+      if (!recId) return;
+      try {
+        await fetch(`/api/recordings/${recId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ progress: Math.round(pct) }),
+        });
+      } catch {}
+    };
+
+    // Report 10% — starting finalization
+    await updateProgress(10);
+
+    // Finalize upload (waits for all chunks)
+    const result = await uploaderRef.current?.finalize(recordingStore.chunksUploaded + 1);
+
+    if (result && recId) {
+      // Report 60% — upload complete, now processing
+      await updateProgress(60);
+
+      // Update the file path on the recording
+      try {
+        await fetch(`/api/recordings/${recId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ progress: 70 }),
+        });
+      } catch {}
+
+      // Trigger server-side processing (ffmpeg merge)
+      try {
+        await fetch(`/api/recordings/${recId}/process`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ filePath: result.path }),
+        });
+      } catch {}
+    } else if (recId) {
+      // Upload failed — mark as failed
+      await fetch(`/api/recordings/${recId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ status: "FAILED", progress: 0 }),
+      }).catch(() => {});
     }
   };
 
@@ -1271,6 +1704,33 @@ export default function GoLivePage() {
     setBattleState("battling");
   };
 
+  const handleEndBattle = () => {
+    setBattleState("idle");
+    setCurrentBattlers(null);
+    setBattleQueue([]);
+    setBattleTimer(roundLength);
+    setScores([0, 0]);
+    setBattleWinner(null);
+  };
+
+  const handleSwitchMode = (newMode: StreamMode) => {
+    handleEndBattle();
+    setMode(newMode);
+
+    if (newMode === "rooms") {
+      setRoomParticipants([currentUser!]);
+    }
+
+    if (broadcastStreamId) {
+      fetch(`/api/live/${broadcastStreamId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ mode: newMode.toUpperCase() }),
+      }).catch(() => {});
+    }
+  };
+
   const handleAcceptToQueue = (userId: string) => {
     const user = allUsers.find((u) => u.id === userId);
     if (user && !battleQueue.find((u) => u.id === userId)) {
@@ -1303,7 +1763,7 @@ export default function GoLivePage() {
     }
   };
 
-  const handleSimulateDonate = async (toUser: User[][0]) => {
+  const handleDonate = async (toUser: User[][0]) => {
     const amount = Math.floor(Math.random() * 500) + 2;
     const newDonation: Donation = {
       id: `d${Date.now()}`,
@@ -1377,6 +1837,52 @@ export default function GoLivePage() {
     setBannedUsers((prev) => prev.filter((b) => b.user !== username));
   };
 
+  const handleKickFromRoom = async (userId: string) => {
+    setRoomParticipants((prev) => prev.filter((u) => u.id !== userId));
+    setBattleQueue((prev) => prev.filter((u) => u.id !== userId));
+    if (broadcastStreamId) {
+      try {
+        await api.live.moderate(broadcastStreamId, { action: "kick", targetUserId: userId });
+      } catch {}
+    }
+  };
+
+  const handleApproveJoin = async (requestId: string, userId: string) => {
+    setJoinRequests((prev) => prev.filter((r) => r.id !== requestId));
+    const user = allUsers.find((u) => u.id === userId);
+    if (user) {
+      if (mode === "rooms") {
+        setRoomParticipants((prev) => prev.find((u) => u.id === userId) ? prev : [...prev, user]);
+      } else {
+        setBattleQueue((prev) => prev.find((u) => u.id === userId) ? prev : [...prev, user]);
+      }
+    }
+    if (broadcastStreamId) {
+      try {
+        await fetch(`/api/live/${broadcastStreamId}/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ participantId: requestId, action: "approve" }),
+        });
+      } catch {}
+    }
+  };
+
+  const handleRejectJoin = async (requestId: string) => {
+    setJoinRequests((prev) => prev.filter((r) => r.id !== requestId));
+    if (broadcastStreamId) {
+      try {
+        await fetch(`/api/live/${broadcastStreamId}/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ participantId: requestId, action: "reject" }),
+        });
+      } catch {}
+    }
+  };
+
   const handleDeleteMessage = (messageId: string) => {
     setChatMessages((prev) => prev.filter((m) => m.id !== messageId));
   };
@@ -1409,6 +1915,23 @@ export default function GoLivePage() {
     });
 
   // ─── Layout grid classes ──────────────────────────────────────────────────
+
+  const handleLayoutChange = (layout: LayoutPreset) => {
+    setSelectedLayout(layout);
+    const layoutOption = LAYOUT_OPTIONS.find((l) => l.id === layout);
+    if (layoutOption) {
+      const newLimit = layoutOption.cols * layoutOption.rows;
+      setGuestLimit(newLimit);
+      if (broadcastStreamId) {
+        fetch(`/api/live/${broadcastStreamId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ guestLimit: newLimit }),
+        }).catch(() => {});
+      }
+    }
+  };
 
   const layoutGridClass: Record<LayoutPreset, string> = {
     "1x1": "grid-cols-1",
@@ -1519,7 +2042,7 @@ export default function GoLivePage() {
                 variant="gradient"
                 size="lg"
                 icon={<Upload size={18} />}
-                onClick={() => router.push("/upload")}
+                onClick={() => router.push("/upload-stream")}
                 className="mt-4"
               >
                 Upload Videos
@@ -1700,6 +2223,28 @@ export default function GoLivePage() {
                   </select>
                 </div>
               )}
+
+              {(mode === "timer_wars") && (
+                <div>
+                  <label className="text-sm font-medium text-text-secondary flex items-center gap-1.5 mb-1.5">
+                    <DollarSign size={14} />
+                    Host Cut %
+                  </label>
+                  <select
+                    value={hostCut}
+                    onChange={(e) => setHostCut(Number(e.target.value))}
+                    className="w-full bg-bg-surface2 text-text border border-border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-primary"
+                  >
+                    <option value={0}>0% (no cut)</option>
+                    <option value={5}>5%</option>
+                    <option value={10}>10%</option>
+                    <option value={15}>15%</option>
+                    <option value={20}>20%</option>
+                    <option value={25}>25%</option>
+                    <option value={50}>50%</option>
+                  </select>
+                </div>
+              )}
             </div>
 
             {/* Ad Schedule Info */}
@@ -1823,7 +2368,7 @@ export default function GoLivePage() {
 
   // ─── Side Panel Content ───────────────────────────────────────────────────
 
-  const renderSidePanelContent = () => (
+  const renderSidePanelContent = (): JSX.Element => (
     <div className="flex flex-col h-full">
       <Tabs tabs={sidePanelTabs} activeTab={sidePanelTab} onChange={(id) => setSidePanelTab(id as SidePanelTab)} />
 
@@ -1959,6 +2504,38 @@ export default function GoLivePage() {
 
             <RevenueSplitCard mode={mode} totalDonations={totalDonations} />
 
+            {/* Credits Rules */}
+            <Card padding="sm" className="!bg-bg-surface2">
+              <h4 className="text-xs font-semibold text-text mb-2 flex items-center gap-1.5">
+                <DollarSign size={14} className="text-success" />
+                Credits Rules
+              </h4>
+              <ul className="space-y-1 text-[11px] text-text-secondary">
+                <li>Min chat: {minCreditsToChat === "0" ? "Free" : `${minCreditsToChat} credits`}</li>
+                <li>Min join: {minCreditsToJoin === "0" ? "Free" : `${minCreditsToJoin} credits`}</li>
+                <li>Host cut: {HOST_CUT_PERCENT}%</li>
+                {queueCreditCost > 0 && <li>Queue cost: {queueCreditCost} credits</li>}
+              </ul>
+            </Card>
+
+            {/* Stream Engine */}
+            {isLive && (
+              <Card padding="sm" className="!bg-bg-surface2">
+                <h4 className="text-xs font-semibold text-text mb-2 flex items-center gap-1.5">
+                  <Radio size={14} className="text-danger" />
+                  Stream Engine
+                </h4>
+                <ul className="space-y-1 text-[11px] text-text-secondary">
+                  <li>Mode: <span className="text-text font-medium">{mode.replace(/_/g, " ")}</span></li>
+                  <li>Layout: <span className="text-text font-medium">{LAYOUT_OPTIONS.find(l => l.id === selectedLayout)?.label}</span></li>
+                  <li>Guest limit: <span className="text-text font-medium">{guestLimit}</span></li>
+                  <li>Viewers: <span className="text-text font-medium">{viewerCount}</span></li>
+                  <li>Duration: <span className="text-text font-medium">{formatTimer(streamDuration)}</span></li>
+                  {adFrequency !== "start_only" && <li>Ad freq: {adFrequency.replace("every_", "Every ")} min</li>}
+                </ul>
+              </Card>
+            )}
+
             <h4 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Recent</h4>
             <div className="space-y-1.5">
               {donations.length === 0 && (
@@ -1995,7 +2572,7 @@ export default function GoLivePage() {
     { id: "last_standing", label: "Last Standing", icon: <Target size={16} />, description: "Random elimination — donate for immunity" },
   ];
 
-  const renderBattlePanel = () => (
+  const renderBattlePanel = (): JSX.Element => (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-text flex items-center gap-2">
@@ -2077,7 +2654,7 @@ export default function GoLivePage() {
                     return (
                       <span key={uid} className="inline-flex items-center gap-1 px-2 py-0.5 bg-success/10 border border-success/20 text-success text-[10px] rounded-full">
                         {u?.displayName || uid}
-                        <button onClick={() => setBattleWhitelist((prev) => prev.filter((id) => id !== uid))} className="hover:text-danger">
+                        <button onClick={() => handleRemoveFromWhitelist(uid)} className="hover:text-danger">
                           <X size={10} />
                         </button>
                       </span>
@@ -2086,8 +2663,8 @@ export default function GoLivePage() {
                 </div>
                 <select
                   onChange={(e) => {
-                    if (e.target.value && !battleWhitelist.includes(e.target.value)) {
-                      setBattleWhitelist((prev) => [...prev, e.target.value]);
+                    if (e.target.value) {
+                      handleAddToWhitelist(e.target.value);
                     }
                     e.target.value = "";
                   }}
@@ -2142,41 +2719,60 @@ export default function GoLivePage() {
               Join Queue (Test)
             </Button>
           )}
+          <Button
+            variant="secondary"
+            size="sm"
+            fullWidth
+            onClick={() => setInviteModalOpen(true)}
+            icon={<Send size={16} />}
+          >
+            Invite to Battle
+          </Button>
+          <Button variant="ghost" size="sm" fullWidth onClick={handleEndBattle} icon={<X size={16} />}>
+            End Battle Mode
+          </Button>
         </div>
       )}
 
       {battleState === "result" && (
-        <Button variant="gradient" size="sm" fullWidth onClick={handleNextBattle} icon={<ArrowRight size={16} />}>
-          {battleQueue.length > 0 ? "Next Challenger" : "Reopen Queue"}
-        </Button>
+        <div className="space-y-2">
+          <Button variant="gradient" size="sm" fullWidth onClick={handleNextBattle} icon={<ArrowRight size={16} />}>
+            {battleQueue.length > 0 ? "Next Challenger" : "Reopen Queue"}
+          </Button>
+          <Button variant="ghost" size="sm" fullWidth onClick={handleEndBattle} icon={<X size={16} />}>
+            End Battle Mode
+          </Button>
+        </div>
       )}
 
       {/* Current Battle */}
       {battleState === "battling" && currentBattlers && (
         <Card padding="sm" className="!bg-bg-surface2">
-          <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center justify-between mb-3">
             <span className="text-xs text-text-muted">Battle in progress</span>
             <span className="text-sm font-bold text-danger flex items-center gap-1">
               <Timer size={14} />
               {formatTimer(battleTimer)}
             </span>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          {/* BattleBar with compact player info */}
+          <BattleBar
+            leftScore={scores[0]}
+            rightScore={scores[1]}
+            leftLabel={currentBattlers[0].displayName}
+            rightLabel={currentBattlers[1].displayName}
+            size="md"
+          />
+          <div className="grid grid-cols-2 gap-3 mt-3">
             <div className="text-center">
-              <img src={currentBattlers[0].avatarUrl ?? undefined} alt="" className="w-12 h-12 rounded-full mx-auto mb-1 border-2 border-primary" />
-              <p className="text-xs font-medium text-text truncate">{currentBattlers[0].displayName}</p>
-              <div className="mt-1 h-2 bg-bg-surface3 rounded-full overflow-hidden">
-                <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${Math.min((scores[0] / Math.max(scores[0] + scores[1], 1)) * 100, 100)}%` }} />
-              </div>
-              <p className="text-xs font-bold text-primary mt-0.5">{scores[0]} pts</p>
+              <img src={currentBattlers[0].avatarUrl ?? undefined} alt="" className="w-10 h-10 rounded-full mx-auto mb-1 border-2 border-primary" />
+              <p className="text-[10px] font-medium text-text truncate">{currentBattlers[0].displayName}</p>
+              <p className="text-xs font-bold text-primary">{scores[0]} pts</p>
             </div>
             <div className="text-center">
-              <img src={currentBattlers[1].avatarUrl ?? undefined} alt="" className="w-12 h-12 rounded-full mx-auto mb-1 border-2 border-accent" />
-              <p className="text-xs font-medium text-text truncate">{currentBattlers[1].displayName}</p>
-              <div className="mt-1 h-2 bg-bg-surface3 rounded-full overflow-hidden">
-                <div className="h-full bg-accent rounded-full transition-all" style={{ width: `${Math.min((scores[1] / Math.max(scores[0] + scores[1], 1)) * 100, 100)}%` }} />
-              </div>
-              <p className="text-xs font-bold text-accent mt-0.5">{scores[1]} pts</p>
+              <img src={currentBattlers[1].avatarUrl ?? undefined} alt="" className="w-10 h-10 rounded-full mx-auto mb-1 border-2 border-accent" />
+              <p className="text-[10px] font-medium text-text truncate">{currentBattlers[1].displayName}</p>
+              <p className="text-xs font-bold text-accent">{scores[1]} pts</p>
             </div>
           </div>
         </Card>
@@ -2248,8 +2844,63 @@ export default function GoLivePage() {
         </div>
       </div>
 
+      {/* Join Requests */}
+      {joinRequests.length > 0 && (
+        <div>
+          <h4 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
+            Join Requests ({joinRequests.length})
+          </h4>
+          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+            {joinRequests.map((req) => (
+              <div key={req.id} className="flex items-center gap-2 p-2 bg-bg-surface2 rounded-lg">
+                <Avatar src={req.avatarUrl} name={req.displayName} size="sm" />
+                <span className="text-xs font-medium text-text flex-1 truncate">{req.displayName}</span>
+                <button
+                  onClick={() => handleApproveJoin(req.id, req.userId)}
+                  className="px-2 py-1 bg-success/20 hover:bg-success/30 text-success text-[10px] font-medium rounded-lg transition-colors"
+                >
+                  Accept
+                </button>
+                <button
+                  onClick={() => handleRejectJoin(req.id)}
+                  className="px-2 py-1 bg-danger/20 hover:bg-danger/30 text-danger text-[10px] font-medium rounded-lg transition-colors"
+                >
+                  Deny
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Host cut info */}
       <RevenueSplitCard mode={mode} totalDonations={totalDonations} />
+
+      {/* Mode Switcher */}
+      {battleState === "idle" && isLive && (
+        <div className="space-y-2 mt-3 pt-3 border-t border-border">
+          <p className="text-[10px] font-medium text-text-muted uppercase tracking-wider">Switch Mode</p>
+          <div className="flex gap-2">
+            {[
+              { id: "standard" as StreamMode, label: "Standard", icon: <Radio size={14} /> },
+              { id: "rooms" as StreamMode, label: "Rooms", icon: <Users size={14} /> },
+            ].map((m) => (
+              <button
+                key={m.id}
+                onClick={() => handleSwitchMode(m.id)}
+                className={cn(
+                  "flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors",
+                  mode === m.id
+                    ? "bg-primary/20 text-primary border border-primary/40"
+                    : "bg-bg-surface3 text-text-secondary hover:bg-bg-surface3/80"
+                )}
+              >
+                {m.icon} {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -2257,16 +2908,20 @@ export default function GoLivePage() {
 
   // Determine grid columns based on participant count
   const getRoomsGridClass = (count: number): string => {
+    // Use selectedLayout if not default 2x2
+    if (selectedLayout !== "2x2") {
+      return layoutGridClass[selectedLayout];
+    }
+    // Auto-layout based on count
     if (count <= 1) return "grid-cols-1";
-    if (count <= 2) return "grid-cols-1 sm:grid-cols-2";
+    if (count <= 2) return "grid-cols-2";
     if (count <= 4) return "grid-cols-2";
-    if (count <= 6) return "grid-cols-2 sm:grid-cols-3";
-    if (count <= 9) return "grid-cols-2 sm:grid-cols-3";
-    // 10 people: 2 rows of 5 on desktop, 2 cols on mobile
-    return "grid-cols-2 sm:grid-cols-3 lg:grid-cols-5";
+    if (count <= 6) return "grid-cols-3";
+    if (count <= 8) return "grid-cols-4";
+    return "grid-cols-5";
   };
 
-  const renderRoomsGrid = () => {
+  const renderRoomsGrid = (): JSX.Element => {
     const count = roomParticipants.length;
     const isFeaturedLayout = count === 10;
 
@@ -2287,42 +2942,62 @@ export default function GoLivePage() {
                 user={roomParticipants[0]}
                 isHost={roomParticipants[0].id === currentUser?.id}
                 donationTotal={userDonations[roomParticipants[0].id] || 0}
-                micActive={true}
-                cameraActive={true}
-                onDonate={() => handleSimulateDonate(roomParticipants[0])}
+                micActive={roomParticipants[0].id === currentUser?.id ? micOn : true}
+                cameraActive={roomParticipants[0].id === currentUser?.id ? cameraOn : true}
+                stream={roomParticipants[0].id === currentUser?.id ? localStream : null}
+                speaking={roomParticipants[0].id === currentUser?.id ? micOn && micVolume > 10 : false}
+                onDonate={() => handleDonate(roomParticipants[0])}
                 background={selectedBg || undefined}
               />
             </div>
             {/* 3x3 grid of remaining participants */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {roomParticipants.slice(1).map((user, idx) => (
-                <ParticipantBox
-                  key={user.id}
-                  user={user}
-                  isHost={user.id === currentUser?.id}
-                  donationTotal={userDonations[user.id] || 0}
-                  micActive={idx < 5}
-                  cameraActive={idx < 7}
-                  onDonate={() => handleSimulateDonate(user)}
-                  background={selectedBg || undefined}
-                />
-              ))}
+              {roomParticipants.slice(1).map((user) => {
+                const isMe = user.id === currentUser?.id;
+                return (
+                  <ParticipantBox
+                    key={user.id}
+                    user={user}
+                    isHost={isMe}
+                    donationTotal={userDonations[user.id] || 0}
+                    micActive={isMe ? micOn : true}
+                    cameraActive={isMe ? cameraOn : true}
+                    stream={isMe ? localStream : null}
+                    speaking={isMe ? micOn && micVolume > 10 : false}
+                    onDonate={() => handleDonate(user)}
+                    onKick={!isMe ? () => handleKickFromRoom(user.id) : undefined}
+                    background={selectedBg || undefined}
+                  />
+                );
+              })}
             </div>
           </div>
         ) : (
           /* Adaptive grid for 1-9 participants */
-          <div className={cn("grid gap-3", getRoomsGridClass(count))}>
-            {roomParticipants.map((user, idx) => (
-              <ParticipantBox
-                key={user.id}
-                user={user}
-                isHost={user.id === currentUser?.id}
-                donationTotal={userDonations[user.id] || 0}
-                micActive={idx < 6}
-                cameraActive={idx < 8}
-                onDonate={() => handleSimulateDonate(user)}
-                background={selectedBg || undefined}
-              />
+          <div className={cn("grid gap-3 max-h-[calc(100vh-200px)] overflow-hidden", getRoomsGridClass(Math.max(count, guestLimit)))}>
+            {roomParticipants.map((user) => {
+              const isMe = user.id === currentUser?.id;
+              return (
+                <ParticipantBox
+                  key={user.id}
+                  user={user}
+                  isHost={isMe}
+                  donationTotal={userDonations[user.id] || 0}
+                  micActive={isMe ? micOn : true}
+                  cameraActive={isMe ? cameraOn : true}
+                  stream={isMe ? localStream : null}
+                  speaking={isMe ? micOn && micVolume > 10 : false}
+                  onDonate={() => handleDonate(user)}
+                  onKick={!isMe ? () => handleKickFromRoom(user.id) : undefined}
+                  background={selectedBg || undefined}
+                />
+              );
+            })}
+            {/* Empty slots up to guest limit */}
+            {Array.from({ length: Math.max(0, guestLimit - roomParticipants.length) }).map((_, i) => (
+              <div key={`empty-${i}`} className="aspect-video rounded-2xl border-2 border-dashed border-border/40 flex items-center justify-center bg-bg-surface2/30">
+                <UserPlus size={20} className="text-text-muted/30" />
+              </div>
             ))}
           </div>
         )}
@@ -2356,7 +3031,54 @@ export default function GoLivePage() {
 
   // ─── Battle Mode Main Video Area ──────────────────────────────────────────
 
-  const renderBattleMainArea = () => (
+  const renderBattleMainArea = (): JSX.Element => {
+    // Timer wars with queue open: show rooms-style grid of participants
+    if (mode === "timer_wars" && (battleState === "queue_open" || battleState === "idle")) {
+      const participants = currentUser ? [currentUser, ...battleQueue.slice(0, guestLimit - 1)] : battleQueue.slice(0, guestLimit);
+      return (
+        <div className="relative">
+          <div className="space-y-3">
+            <div className={cn("grid gap-3 max-h-[calc(100vh-200px)] overflow-hidden", getRoomsGridClass(Math.min(guestLimit, Math.max(participants.length, guestLimit))))}>
+              {participants.map((user) => {
+                const isMe = user.id === currentUser?.id;
+                return (
+                  <ParticipantBox
+                    key={user.id}
+                    user={user}
+                    isHost={isMe}
+                    donationTotal={userDonations[user.id] || 0}
+                    micActive={isMe ? micOn : true}
+                    cameraActive={isMe ? cameraOn : true}
+                    stream={isMe ? localStream : null}
+                    speaking={isMe ? micOn && micVolume > 10 : false}
+                    onDonate={() => handleDonate(user)}
+                    onKick={!isMe ? () => handleKickFromRoom(user.id) : undefined}
+                    background={selectedBg || undefined}
+                  />
+                );
+              })}
+              {Array.from({ length: Math.max(0, guestLimit - participants.length) }).map((_, i) => (
+                <div key={`empty-${i}`} className="aspect-video rounded-2xl border-2 border-dashed border-border/40 flex items-center justify-center bg-bg-surface2/30">
+                  <span className="text-xs text-text-muted">Empty</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Mode badge */}
+          <span className="absolute top-3 right-3 px-2.5 py-1 rounded-full bg-primary/90 text-white text-xs font-bold flex items-center gap-1 z-20">
+            <Timer size={12} /> Timer Wars
+          </span>
+          {/* Tags */}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {tags.map((tag) => (
+              <span key={tag} className="px-2 py-0.5 bg-bg-surface2 text-text-muted text-xs rounded-full">#{tag}</span>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    return (
     <div className="relative">
       {/* Main battle area — always aspect-video */}
       <div
@@ -2365,38 +3087,22 @@ export default function GoLivePage() {
       >
         {/* Battle game content (background) */}
         {battleState === "battling" && currentBattlers ? (
-          <div className="absolute inset-0 flex">
-            {/* Left battler */}
-            <div className="flex-1 flex flex-col items-center justify-center relative border-r-2 border-primary/30">
-              <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-primary/10 to-transparent">
-                <img src={currentBattlers[0].avatarUrl ?? undefined} alt="" className="w-20 h-20 md:w-28 md:h-28 rounded-full border-4 border-primary" />
-              </div>
-              <div className="absolute bottom-3 left-0 right-0 text-center">
-                <p className="text-sm font-bold text-text bg-black/60 inline-block px-3 py-1 rounded-full">{currentBattlers[0].displayName}</p>
-                <p className="text-lg font-bold text-primary">{scores[0]}</p>
-              </div>
-              <div className="absolute top-2 left-2 px-2 py-0.5 bg-primary/90 text-white text-[10px] font-bold rounded-full">P1</div>
-            </div>
-            {/* VS divider */}
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 flex flex-col items-center">
-              <div className="w-14 h-14 rounded-full bg-black/80 border-2 border-danger flex flex-col items-center justify-center">
-                <Swords size={18} className="text-danger" />
-                <span className="text-[9px] font-bold text-white">VS</span>
-              </div>
-              <span className="text-sm font-bold text-danger mt-1 bg-black/60 px-2 py-0.5 rounded-full">{formatTimer(battleTimer)}</span>
-            </div>
-            {/* Right battler */}
-            <div className="flex-1 flex flex-col items-center justify-center relative">
-              <div className="w-full h-full flex items-center justify-center bg-gradient-to-bl from-accent/10 to-transparent">
-                <img src={currentBattlers[1].avatarUrl ?? undefined} alt="" className="w-20 h-20 md:w-28 md:h-28 rounded-full border-4 border-accent" />
-              </div>
-              <div className="absolute bottom-3 left-0 right-0 text-center">
-                <p className="text-sm font-bold text-text bg-black/60 inline-block px-3 py-1 rounded-full">{currentBattlers[1].displayName}</p>
-                <p className="text-lg font-bold text-accent">{scores[1]}</p>
-              </div>
-              <div className="absolute top-2 right-2 px-2 py-0.5 bg-accent/90 text-white text-[10px] font-bold rounded-full">P2</div>
-            </div>
-          </div>
+          <SplitScreenBattle
+            leftPlayer={{
+              user: currentBattlers[0],
+              score: scores[0],
+              stream: currentBattlers[0].id === currentUser?.id ? localStream : undefined,
+            }}
+            rightPlayer={{
+              user: currentBattlers[1],
+              score: scores[1],
+              stream: currentBattlers[1].id === currentUser?.id ? localStream : undefined,
+            }}
+            timer={battleTimer}
+            activePowerUps={activePowerUps}
+            onGiftLeft={() => handleDonate(currentBattlers[0])}
+            onGiftRight={() => handleDonate(currentBattlers[1])}
+          />
         ) : battleState === "result" && currentBattlers && battleWinner !== null ? (
           <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-success/10 to-transparent">
             <div className="text-center space-y-3">
@@ -2459,6 +3165,7 @@ export default function GoLivePage() {
       </div>
     </div>
   );
+  };
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LIVE DASHBOARD RENDER
@@ -2484,6 +3191,12 @@ export default function GoLivePage() {
               onStop={handleStopRecording}
             />
           )}
+          {streamlabsConnected && (
+            <span className="flex items-center gap-1 text-[11px] text-[#80f5d2] bg-[#80f5d2]/10 px-2 py-0.5 rounded-full border border-[#80f5d2]/20" title="Streamlabs connected">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#80f5d2] animate-pulse" />
+              SL
+            </span>
+          )}
           <span className="flex items-center gap-1.5 text-xs md:text-sm text-text-secondary">
             <Eye size={14} />
             {viewerCount.toLocaleString()}
@@ -2503,6 +3216,16 @@ export default function GoLivePage() {
         {/* Donation alert overlay */}
         {currentDonationAlert && (
           <DonationAlert alert={currentDonationAlert} onComplete={handleDonationAlertComplete} />
+        )}
+
+        {/* Disconnect countdown overlay — appears when streamer navigates away */}
+        {disconnectCountdown !== null && (
+          <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center gap-4">
+            <div className="text-6xl font-bold text-danger tabular-nums">{disconnectCountdown}</div>
+            <p className="text-lg text-white font-medium">Stream ending in {disconnectCountdown} second{disconnectCountdown !== 1 ? "s" : ""}...</p>
+            <p className="text-sm text-text-muted">You navigated away from this tab. Come back to cancel.</p>
+            <Button variant="danger" size="lg" onClick={handleEndStream}>End Stream Now</Button>
+          </div>
         )}
         {/* Left / Center: main content area */}
         <div className="flex-1 overflow-y-auto p-3 space-y-3">
@@ -2729,6 +3452,26 @@ export default function GoLivePage() {
         </button>
       </div>
 
+      {/* ============================================================
+          TEST ONLY — Admin self-invite for testing. REMOVE before production.
+          This is a test feature. It is an error if this ships to production.
+          ============================================================ */}
+      {!!(currentUser as unknown as Record<string, unknown>)?.isOwner && isLive && broadcastStreamId && (
+        <div className="shrink-0 flex items-center justify-center px-4 py-1 bg-yellow-900/30 border-t border-yellow-600/30">
+          <button
+            className="px-3 py-1.5 text-xs bg-yellow-600 text-white rounded hover:bg-yellow-700 transition-colors"
+            onClick={async () => {
+              try {
+                await api.live.join(broadcastStreamId, "guest");
+                handleAcceptToQueue(currentUser!.id);
+              } catch {}
+            }}
+          >
+            [TEST] Join Own Stream
+          </button>
+        </div>
+      )}
+
       {/* ── Layout Modal ─────────────────────────────────────────────────── */}
       <Modal isOpen={layoutModalOpen} onClose={() => setLayoutModalOpen(false)} title="Layout Customization" size="md">
         <div className="space-y-5">
@@ -2738,7 +3481,7 @@ export default function GoLivePage() {
               {LAYOUT_OPTIONS.map((layout) => (
                 <button
                   key={layout.id}
-                  onClick={() => setSelectedLayout(layout.id)}
+                  onClick={() => handleLayoutChange(layout.id)}
                   className={cn(
                     "flex flex-col items-center gap-1.5 p-3 rounded-xl border transition-colors",
                     selectedLayout === layout.id
@@ -2774,7 +3517,7 @@ export default function GoLivePage() {
               ].map((preset) => (
                 <button
                   key={preset.label}
-                  onClick={() => setSelectedLayout(preset.layout)}
+                  onClick={() => handleLayoutChange(preset.layout)}
                   className="flex flex-col items-center gap-2 p-3 rounded-xl border border-border bg-bg-surface2 hover:border-primary transition-colors"
                 >
                   <span className="text-text">{preset.icon}</span>
@@ -2783,6 +3526,10 @@ export default function GoLivePage() {
               ))}
             </div>
           </div>
+
+          <p className="text-xs text-text-secondary mt-3">
+            Current capacity: {guestLimit} participant{guestLimit !== 1 ? "s" : ""}
+          </p>
         </div>
       </Modal>
 
@@ -2905,6 +3652,23 @@ export default function GoLivePage() {
             </select>
           </div>
 
+          <div>
+            <label className="text-sm font-medium text-text-secondary">Disconnect Timeout</label>
+            <p className="text-[11px] text-text-muted mb-1">How long your stream stays alive if you navigate away</p>
+            <select
+              value={disconnectTimeout}
+              onChange={(e) => setDisconnectTimeout(Number(e.target.value))}
+              className="mt-1 w-full bg-bg-surface2 text-text border border-border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-primary"
+            >
+              <option value={15}>15 seconds</option>
+              <option value={30}>30 seconds</option>
+              <option value={60}>1 minute</option>
+              <option value={120}>2 minutes</option>
+              <option value={180}>3 minutes</option>
+              <option value={300}>5 minutes</option>
+            </select>
+          </div>
+
           <div className="space-y-3 pt-2">
             <div className="flex items-center justify-between">
               <span className="text-sm text-text">Camera</span>
@@ -2953,26 +3717,76 @@ export default function GoLivePage() {
             </div>
           </div>
 
-          {/* Custom overlay images */}
+          {/* Custom overlay images — file upload */}
           <div className="pt-2 border-t border-border space-y-3">
             <h4 className="text-sm font-medium text-text">Overlay Images</h4>
             <div>
-              <label className="text-xs font-medium text-text-secondary mb-1 block">Camera Off Image (URL)</label>
+              <label className="text-xs font-medium text-text-secondary mb-1 block">Camera Off Image</label>
+              {cameraOffImage && (
+                <div className="mb-2 relative w-24 h-24 rounded-lg overflow-hidden border border-border">
+                  <img src={cameraOffImage} alt="Camera off preview" className="w-full h-full object-cover" />
+                  <button
+                    onClick={() => setCameraOffImage("")}
+                    className="absolute top-1 right-1 w-5 h-5 bg-black/70 rounded-full flex items-center justify-center text-white hover:bg-danger transition-colors"
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+              )}
               <input
-                className="w-full bg-bg-surface2 text-text text-xs rounded-lg px-3 py-2 border border-border focus:outline-none focus:border-primary"
-                value={cameraOffImage}
-                onChange={(e) => setCameraOffImage(e.target.value)}
-                placeholder="https://example.com/camera-off.png"
+                type="file"
+                accept="image/*"
+                className="w-full text-xs text-text-secondary file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-primary/10 file:text-primary hover:file:bg-primary/20 file:cursor-pointer cursor-pointer"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const formData = new FormData();
+                  formData.append("file", file);
+                  formData.append("type", "camera");
+                  try {
+                    const res = await fetch("/api/upload/stream-gallery", { method: "POST", body: formData, credentials: "include" });
+                    if (res.ok) {
+                      const data = await res.json();
+                      setCameraOffImage(data.url);
+                    }
+                  } catch {}
+                  e.target.value = "";
+                }}
               />
               <p className="text-[10px] text-text-muted mt-0.5">Shown when camera is off. Leave empty for default.</p>
             </div>
             <div>
-              <label className="text-xs font-medium text-text-secondary mb-1 block">Mute Image (URL)</label>
+              <label className="text-xs font-medium text-text-secondary mb-1 block">Mute Image</label>
+              {muteImage && (
+                <div className="mb-2 relative w-24 h-24 rounded-lg overflow-hidden border border-border">
+                  <img src={muteImage} alt="Mute preview" className="w-full h-full object-cover" />
+                  <button
+                    onClick={() => setMuteImage("")}
+                    className="absolute top-1 right-1 w-5 h-5 bg-black/70 rounded-full flex items-center justify-center text-white hover:bg-danger transition-colors"
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+              )}
               <input
-                className="w-full bg-bg-surface2 text-text text-xs rounded-lg px-3 py-2 border border-border focus:outline-none focus:border-primary"
-                value={muteImage}
-                onChange={(e) => setMuteImage(e.target.value)}
-                placeholder="https://example.com/mute.png"
+                type="file"
+                accept="image/*"
+                className="w-full text-xs text-text-secondary file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-primary/10 file:text-primary hover:file:bg-primary/20 file:cursor-pointer cursor-pointer"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const formData = new FormData();
+                  formData.append("file", file);
+                  formData.append("type", "microphone");
+                  try {
+                    const res = await fetch("/api/upload/stream-gallery", { method: "POST", body: formData, credentials: "include" });
+                    if (res.ok) {
+                      const data = await res.json();
+                      setMuteImage(data.url);
+                    }
+                  } catch {}
+                  e.target.value = "";
+                }}
               />
               <p className="text-[10px] text-text-muted mt-0.5">Shown as overlay when mic is muted. Leave empty for none.</p>
             </div>
@@ -3290,8 +4104,8 @@ export default function GoLivePage() {
             </p>
             <select
               onChange={(e) => {
-                if (e.target.value && !battleWhitelist.includes(e.target.value)) {
-                  setBattleWhitelist((prev) => [...prev, e.target.value]);
+                if (e.target.value) {
+                  handleAddToWhitelist(e.target.value);
                 }
                 e.target.value = "";
               }}
@@ -3315,7 +4129,7 @@ export default function GoLivePage() {
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-success/20 text-success">Free</span>
                       </div>
                       <button
-                        onClick={() => setBattleWhitelist((prev) => prev.filter((id) => id !== uid))}
+                        onClick={() => handleRemoveFromWhitelist(uid)}
                         className="shrink-0 px-2 py-1 text-[10px] font-medium text-danger bg-danger/10 hover:bg-danger/20 rounded-lg transition-colors"
                       >
                         Remove
@@ -3374,6 +4188,16 @@ export default function GoLivePage() {
           </div>
         </div>
       </Drawer>
+
+      {/* ── Invite to Battle Modal ──────────────────────────────────── */}
+      <InviteBattleModal
+        isOpen={inviteModalOpen}
+        onClose={() => setInviteModalOpen(false)}
+        streamId={broadcastStreamId || ""}
+        onInviteSent={() => {
+          // Refresh battle queue or show notification
+        }}
+      />
     </div>
   );
 }

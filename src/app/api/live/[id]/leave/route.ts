@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
+import { buildSessionEnvelope } from "@/lib/live/session-state";
 
 // POST: Leave a live stream
 export async function POST(
@@ -42,7 +43,11 @@ export async function POST(
       },
     });
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({
+      success: true,
+      session: buildSessionEnvelope(liveStream),
+      authority: { source: "server", ownerId: liveStream.hostId, actor: "viewer" },
+    });
   } catch (error) {
     console.error("POST /api/live/[id]/leave error:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

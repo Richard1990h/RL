@@ -90,7 +90,14 @@ export async function POST(request: NextRequest) {
     // Save metadata on first chunk
     const metaPath = path.join(chunkDir, "meta.json");
     try {
-      await fs.access(metaPath);
+      const metaRaw = await fs.readFile(metaPath, "utf-8");
+      const meta = JSON.parse(metaRaw) as { userId?: string; totalChunks?: number; fileName?: string };
+      if (meta.userId !== user.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+      }
+      if (meta.totalChunks !== totalChunks) {
+        return NextResponse.json({ error: "Chunk total mismatch" }, { status: 400 });
+      }
     } catch {
       await fs.writeFile(metaPath, JSON.stringify({
         userId: user.id,

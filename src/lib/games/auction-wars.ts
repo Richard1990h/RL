@@ -21,8 +21,49 @@ function auctionTick(state: GameState, deltaMs: number): GameState {
   if (state.phase !== "active") return state;
 
   const auctionActive = state.data.auctionActive as boolean;
-  if (!auctionActive) return state;
 
+  // Result display phase (runs when auctionActive is false)
+  if (!auctionActive) {
+    const resultTimer = state.data.resultTimer as number;
+    if (resultTimer > 0) {
+      state.data.resultTimer = resultTimer - deltaMs / 1000;
+      if (resultTimer - deltaMs / 1000 <= 0) {
+        state.data.showingResult = false;
+        state.data.resultTimer = 0;
+
+        // Next item or end
+        const itemIndex = (state.data.itemIndex as number) || 0;
+        const items = (state.data.items as AuctionItem[]) || [];
+
+        if (itemIndex + 1 >= items.length) {
+          state.phase = "finished";
+          // Winner is whoever won the most items (or spent the most)
+          const wonItems = (state.data.wonItems as Record<string, string[]>) || {};
+          let maxItems = 0;
+          let winnerId: string | null = null;
+          for (const [userId, userItems] of Object.entries(wonItems)) {
+            if (userItems.length > maxItems) {
+              maxItems = userItems.length;
+              winnerId = userId;
+            }
+          }
+          state.winner = winnerId;
+        } else {
+          // Next item
+          state.data.itemIndex = itemIndex + 1;
+          state.data.auctionActive = true;
+          state.data.highBid = items[itemIndex + 1].startingBid;
+          state.data.highBidder = null;
+          state.data.bidHistory = [];
+          state.timeRemaining = 30; // 30 seconds per item
+          state.round = itemIndex + 2;
+        }
+      }
+    }
+    return state;
+  }
+
+  // Active auction countdown
   state.timeRemaining -= deltaMs / 1000;
 
   if (state.timeRemaining <= 0) {
@@ -50,45 +91,6 @@ function auctionTick(state: GameState, deltaMs: number): GameState {
     // Show result for 3 seconds then move to next
     state.data.showingResult = true;
     state.data.resultTimer = 3;
-    return state;
-  }
-
-  // Result display timer
-  const resultTimer = state.data.resultTimer as number;
-  if (resultTimer > 0) {
-    state.data.resultTimer = resultTimer - deltaMs / 1000;
-    if (resultTimer - deltaMs / 1000 <= 0) {
-      state.data.showingResult = false;
-      state.data.resultTimer = 0;
-
-      // Next item or end
-      const itemIndex = (state.data.itemIndex as number) || 0;
-      const items = (state.data.items as AuctionItem[]) || [];
-
-      if (itemIndex + 1 >= items.length) {
-        state.phase = "finished";
-        // Winner is whoever won the most items (or spent the most)
-        const wonItems = (state.data.wonItems as Record<string, string[]>) || {};
-        let maxItems = 0;
-        let winnerId: string | null = null;
-        for (const [userId, items] of Object.entries(wonItems)) {
-          if (items.length > maxItems) {
-            maxItems = items.length;
-            winnerId = userId;
-          }
-        }
-        state.winner = winnerId;
-      } else {
-        // Next item
-        state.data.itemIndex = itemIndex + 1;
-        state.data.auctionActive = true;
-        state.data.highBid = items[itemIndex + 1].startingBid;
-        state.data.highBidder = null;
-        state.data.bidHistory = [];
-        state.timeRemaining = 30; // 30 seconds per item
-        state.round = itemIndex + 2;
-      }
-    }
   }
 
   return state;

@@ -40,9 +40,9 @@ interface UserSeries {
 }
 
 const THUMBNAIL_OPTIONS = [
-  { id: "t1", label: "Option 1" },
-  { id: "t2", label: "Option 2" },
-  { id: "t3", label: "Option 3" },
+  { id: "t1", label: "Auto-generated 1" },
+  { id: "t2", label: "Auto-generated 2" },
+  { id: "t3", label: "Auto-generated 3" },
 ];
 
 type Visibility = "public" | "private" | "unlisted";
@@ -423,10 +423,23 @@ export default function UploadPage() {
     setNewSeriesDescription("");
   };
 
-  // Simulate custom thumbnail upload
+  // Custom thumbnail upload via hidden file input
+  const customThumbnailInputRef = useRef<HTMLInputElement>(null);
+  const [customThumbnailUrl, setCustomThumbnailUrl] = useState<string | null>(null);
+
   const handleCustomThumbnailUpload = () => {
-    setCustomThumbnailName("custom-thumbnail.jpg");
+    customThumbnailInputRef.current?.click();
+  };
+
+  const handleCustomThumbnailSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (customThumbnailUrl) URL.revokeObjectURL(customThumbnailUrl);
+    const url = URL.createObjectURL(file);
+    setCustomThumbnailUrl(url);
+    setCustomThumbnailName(file.name);
     setThumbnailMode("custom");
+    if (customThumbnailInputRef.current) customThumbnailInputRef.current.value = "";
   };
 
   const visibilityOptions: { value: Visibility; label: string; icon: typeof Globe; desc: string }[] = [
@@ -455,6 +468,13 @@ export default function UploadPage() {
               accept="video/*,video/mp4,video/webm,video/quicktime,video/3gpp,.mp4,.webm,.mov,.avi,.mkv,.3gp,.m4v"
               className="hidden"
               onChange={handleFileSelected}
+            />
+            <input
+              ref={customThumbnailInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleCustomThumbnailSelected}
             />
             <label className="text-sm font-medium text-text-secondary mb-2 block">
               Video File
@@ -712,9 +732,13 @@ export default function UploadPage() {
                 )}
               >
                 <div className="w-20 aspect-video rounded-lg bg-bg-surface3 flex items-center justify-center overflow-hidden">
-                  <div className="w-full h-full bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center">
-                    <span className="text-text-muted text-[10px]">Custom</span>
-                  </div>
+                  {customThumbnailUrl ? (
+                    <img src={customThumbnailUrl} alt="Custom thumbnail" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center">
+                      <span className="text-text-muted text-[10px]">Custom</span>
+                    </div>
+                  )}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-text text-sm font-medium truncate">{customThumbnailName}</p>
@@ -738,6 +762,8 @@ export default function UploadPage() {
                   <button
                     type="button"
                     onClick={() => {
+                      if (customThumbnailUrl) URL.revokeObjectURL(customThumbnailUrl);
+                      setCustomThumbnailUrl(null);
                       setCustomThumbnailName(null);
                       setThumbnailMode("auto");
                     }}
@@ -952,7 +978,7 @@ export default function UploadPage() {
                           style={{
                             width: seriesInfo.currentCount === 0
                               ? "100%"
-                              : `${((seriesInfo.nextEpisode) / seriesInfo.nextEpisode) * 100}%`,
+                              : `${Math.min(100, (seriesInfo.currentCount / Math.max(1, seriesInfo.nextEpisode)) * 100)}%`,
                           }}
                         />
                       </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Play,
   Pause,
@@ -66,13 +66,15 @@ export default function VideoPlayer({
   const [buffered, setBuffered] = useState(0);
   const [hasStarted, setHasStarted] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [firstFrameReady, setFirstFrameReady] = useState(false);
   const viewTrackedRef = useRef(false);
+  const startupRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startupStartedAtRef = useRef<number | null>(null);
+  const firstFrameDrawnRef = useRef(false);
 
-  // Startup buffer safety: track whether the browser has enough data to play through
-  const [canPlayThrough, setCanPlayThrough] = useState(false);
   const pendingPlayRef = useRef(false);
 
-  // Quality lock: prevent upswitch during first 10 seconds of playback
+  // Quality lock: keep startup on the lowest rendition until first frame is established
   const playStartTimeRef = useRef<number | null>(null);
   const [qualityLocked, setQualityLocked] = useState(true);
 
@@ -83,8 +85,14 @@ export default function VideoPlayer({
     adPhaseRef.current = adPhase;
   }, [adPhase]);
 
-  // Fullscreen
+  // Fullscreen (viewport-bound, app-style)
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState<number>(
+    typeof window !== "undefined" ? window.innerWidth : 0
+  );
+  const [viewportHeight, setViewportHeight] = useState<number>(
+    typeof window !== "undefined" ? window.innerHeight : 0
+  );
 
   // Volume
   const [volume, setVolume] = useState(80);
@@ -97,42 +105,39 @@ export default function VideoPlayer({
   const [quality, setQuality] = useState<Quality>("Auto");
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const qualityMenuRef = useRef<HTMLDivElement>(null);
-  const [effectiveUrl, setEffectiveUrl] = useState(videoUrl);
+  const sortedResolutionsAsc = useMemo(() => [...resolutions].sort((a, b) => a.height - b.height), [resolutions]);
+  const lowestResolution = sortedResolutionsAsc[0];
+  const highestResolution = sortedResolutionsAsc[sortedResolutionsAsc.length - 1];
+  const [effectiveUrl, setEffectiveUrl] = useState<string | null | undefined>(lowestResolution?.url ?? videoUrl);
 
-  // Unlock quality switching after 10 seconds of playback
+  // Unlock quality only after first frame has rendered.
   useEffect(() => {
-    if (!qualityLocked || !playStartTimeRef.current) return;
-    const timer = setTimeout(() => setQualityLocked(false), 10000);
+    if (!qualityLocked || !firstFrameReady) return;
+    const timer = setTimeout(() => setQualityLocked(false), 180);
     return () => clearTimeout(timer);
-  }, [qualityLocked, playing]);
+  }, [qualityLocked, firstFrameReady]);
 
-  // Auto quality selection — start on lowest available, upswitch after lock expires
+  // Auto quality selection — always start on lowest and upswitch silently after lock expires.
   useEffect(() => {
     if (quality !== "Auto" || resolutions.length === 0) return;
 
-    const sorted = [...resolutions].sort((a, b) => a.height - b.height);
-    const lowest = sorted[0];
-    const highest = sorted[sorted.length - 1];
-
     if (qualityLocked) {
-      // During startup lock period: always use lowest resolution
-      if (lowest) setEffectiveUrl(lowest.url);
+      if (lowestResolution) setEffectiveUrl(lowestResolution.url);
     } else {
-      // Lock expired — pick based on connection quality
       const conn = (navigator as any).connection;
       const downlink = conn?.downlink;
       const effectiveType = conn?.effectiveType;
 
       if (effectiveType === "slow-2g" || effectiveType === "2g" || (downlink !== undefined && downlink < 1)) {
-        if (lowest) setEffectiveUrl(lowest.url);
+        if (lowestResolution) setEffectiveUrl(lowestResolution.url);
       } else if (effectiveType === "3g" || (downlink !== undefined && downlink < 3)) {
-        if (lowest) setEffectiveUrl(lowest.url);
+        if (lowestResolution) setEffectiveUrl(lowestResolution.url);
       } else {
-        if (highest) setEffectiveUrl(highest.url);
+        if (highestResolution) setEffectiveUrl(highestResolution.url);
         else setEffectiveUrl(videoUrl);
       }
     }
-  }, [quality, resolutions, videoUrl, qualityLocked]);
+  }, [quality, resolutions, videoUrl, qualityLocked, lowestResolution, highestResolution]);
 
   // When quality is manually selected, switch URL
   useEffect(() => {
@@ -154,17 +159,41 @@ export default function VideoPlayer({
     const savedTime = vid.currentTime;
     vid.src = effectiveUrl;
     vid.load();
-    vid.currentTime = savedTime;
+    if (savedTime > 0) {
+      try { vid.currentTime = savedTime; } catch {}
+    }
     if (wasPlaying) vid.play().catch(() => {});
   }, [effectiveUrl]);
 
   // Controls visibility
   const [showControls, setShowControls] = useState(true);
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const overlayGestureRef = useRef<{
+    pointerId: number | null;
+    startX: number;
+    startY: number;
+    moved: boolean;
+    startAt: number;
+    intent: "pending" | "vertical" | "horizontal" | "tap" | "scrub";
+  }>({
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    moved: false,
+    startAt: 0,
+    intent: "pending",
+  });
 
-  // Start content playback after ad completes or errors.
-  // Waits for canplaythrough before calling play() to avoid startup stutter.
+  // Start content playback after ad completes/errors.
+  // Prefer instant startup: play as soon as minimum data is available.
   const startContent = useCallback(() => {
+    if (startupRetryRef.current) {
+      clearInterval(startupRetryRef.current);
+      startupRetryRef.current = null;
+    }
+    startupStartedAtRef.current = performance.now();
+    setFirstFrameReady(false);
+    firstFrameDrawnRef.current = false;
     setAdPhase("done");
     const vid = videoRef.current;
     if (!vid) return;
@@ -178,19 +207,60 @@ export default function VideoPlayer({
       vid.currentTime = 0;
       pendingPlayRef.current = true;
       setIsBuffering(true);
+      startupRetryRef.current = setInterval(() => {
+        const v = videoRef.current;
+        if (!v || !pendingPlayRef.current) {
+          if (startupRetryRef.current) {
+            clearInterval(startupRetryRef.current);
+            startupRetryRef.current = null;
+          }
+          return;
+        }
+        const startedAt = startupStartedAtRef.current ?? 0;
+        if (performance.now() - startedAt > 1200) {
+          if (startupRetryRef.current) {
+            clearInterval(startupRetryRef.current);
+            startupRetryRef.current = null;
+          }
+          return;
+        }
+        v.play().catch(() => {});
+      }, 50);
       return;
     }
 
-    if (vid.readyState >= 4) {
-      // HAVE_ENOUGH_DATA — safe to play immediately
-      vid.play().catch(() => {});
-      setPlaying(true);
-      playStartTimeRef.current = Date.now();
-    } else {
-      // Not enough data yet — defer play until canplaythrough fires
-      pendingPlayRef.current = true;
-      setIsBuffering(true);
-    }
+    // Aggressive startup: attempt play immediately, then recover if data is not ready.
+    pendingPlayRef.current = true;
+    setIsBuffering(true);
+    vid.play()
+      .then(() => {
+        pendingPlayRef.current = false;
+        setIsBuffering(false);
+        setPlaying(true);
+        playStartTimeRef.current = Date.now();
+      })
+      .catch(() => {
+        // onCanPlay/onLoadedData will fulfill pending play.
+      });
+    startupRetryRef.current = setInterval(() => {
+      const v = videoRef.current;
+      if (!v || !pendingPlayRef.current) {
+        if (startupRetryRef.current) {
+          clearInterval(startupRetryRef.current);
+          startupRetryRef.current = null;
+        }
+        return;
+      }
+      const startedAt = startupStartedAtRef.current ?? 0;
+      if (performance.now() - startedAt > 1200) {
+        if (startupRetryRef.current) {
+          clearInterval(startupRetryRef.current);
+          startupRetryRef.current = null;
+        }
+        return;
+      }
+      v.play().catch(() => {});
+    }, 50);
   }, [effectiveUrl, videoUrl]);
 
   const { requestAds, isAdPlaying, destroyAds } = useImaAds({
@@ -218,20 +288,27 @@ export default function VideoPlayer({
   // Load video when src changes — reset ad phase for fresh pre-roll
   useEffect(() => {
     if (videoRef.current && videoUrl) {
-      setEffectiveUrl(videoUrl);
+      setQuality("Auto");
+      setEffectiveUrl(lowestResolution?.url ?? videoUrl);
       videoRef.current.load();
       setHasStarted(false);
       setPlaying(false);
       setProgress(0);
       setCurrentTime(0);
       setAdPhase("idle");
-      setCanPlayThrough(false);
       setQualityLocked(true);
+      setFirstFrameReady(false);
       pendingPlayRef.current = false;
       playStartTimeRef.current = null;
+      firstFrameDrawnRef.current = false;
+      startupStartedAtRef.current = null;
+      if (startupRetryRef.current) {
+        clearInterval(startupRetryRef.current);
+        startupRetryRef.current = null;
+      }
       destroyAds();
     }
-  }, [videoUrl, destroyAds]);
+  }, [videoUrl, destroyAds, lowestResolution]);
 
   // Sync volume to video element
   useEffect(() => {
@@ -241,14 +318,41 @@ export default function VideoPlayer({
     }
   }, [volume, muted]);
 
-  // Fullscreen change listener
+  // Keep fullscreen height tied to viewport to prevent orientation jitter.
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+    const updateViewport = () => {
+      const vv = window.visualViewport;
+      setViewportWidth(vv?.width ?? window.innerWidth);
+      setViewportHeight(vv?.height ?? window.innerHeight);
     };
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    window.addEventListener("resize", updateViewport);
+    window.addEventListener("orientationchange", updateViewport);
+    window.visualViewport?.addEventListener("resize", updateViewport);
+    updateViewport();
+    return () => {
+      window.removeEventListener("resize", updateViewport);
+      window.removeEventListener("orientationchange", updateViewport);
+      window.visualViewport?.removeEventListener("resize", updateViewport);
+    };
   }, []);
+
+  // Lock page scroll while viewport fullscreen is active.
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [isFullscreen]);
+
+  // Fullscreen should replace the app layout, not just enlarge a widget.
+  useEffect(() => {
+    document.documentElement.classList.toggle("video-immersive", isFullscreen);
+    return () => {
+      document.documentElement.classList.remove("video-immersive");
+    };
+  }, [isFullscreen]);
 
   // Close quality menu on outside click
   useEffect(() => {
@@ -294,7 +398,7 @@ export default function VideoPlayer({
         case "Escape":
           if (isFullscreen) {
             try { screen.orientation.unlock(); } catch {}
-            document.exitFullscreen?.();
+            setIsFullscreen(false);
           }
           if (showQualityMenu) setShowQualityMenu(false);
           break;
@@ -336,23 +440,18 @@ export default function VideoPlayer({
   const toggleFullscreen = async () => {
     if (!containerRef.current) return;
     try {
-      if (!document.fullscreenElement) {
-        await containerRef.current.requestFullscreen();
-        // On mobile, lock to landscape; on desktop, lock to natural to prevent rotation
+      if (!isFullscreen) {
+        setIsFullscreen(true);
         try {
           const orient = screen.orientation as any;
           if (orient?.lock) {
             const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
             await orient.lock(isMobile ? "landscape" : "any");
           }
-        } catch {
-          // orientation lock not supported in all browsers — that's fine
-        }
-      } else {
-        try {
-          screen.orientation.unlock();
         } catch {}
-        await document.exitFullscreen();
+      } else {
+        try { screen.orientation.unlock(); } catch {}
+        setIsFullscreen(false);
       }
     } catch {}
   };
@@ -378,10 +477,10 @@ export default function VideoPlayer({
     if (adPhaseRef.current === "playing") return;
     setPlaying(false);
     setProgress(100);
-    // Exit fullscreen when video ends
-    if (document.fullscreenElement) {
+    // Exit viewport fullscreen when video ends
+    if (isFullscreen) {
       try { screen.orientation.unlock(); } catch {}
-      document.exitFullscreen().catch(() => {});
+      setIsFullscreen(false);
     }
     onEnded();
   };
@@ -418,6 +517,56 @@ export default function VideoPlayer({
     }
   };
 
+  const handleOverlayPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    overlayGestureRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+      startAt: performance.now(),
+      intent: "pending",
+    };
+  };
+
+  const handleOverlayPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const gesture = overlayGestureRef.current;
+    if (gesture.pointerId !== e.pointerId) return;
+    if (gesture.moved) return;
+    const dx = Math.abs(e.clientX - gesture.startX);
+    const dy = Math.abs(e.clientY - gesture.startY);
+    if (gesture.intent === "pending" && (dx > 4 || dy > 4)) {
+      // Strict arbitration: vertical swipe > horizontal > tap.
+      if (dy >= dx * 0.85) {
+        gesture.intent = "vertical";
+      } else {
+        gesture.intent = "horizontal";
+      }
+    }
+    if (dx > 12 || dy > 12) {
+      gesture.moved = true;
+    }
+    if (gesture.intent === "vertical" && dy > 6) {
+      gesture.moved = true;
+    }
+  };
+
+  const handleOverlayPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const gesture = overlayGestureRef.current;
+    if (gesture.pointerId !== e.pointerId) return;
+    const dx = Math.abs(e.clientX - gesture.startX);
+    const dy = Math.abs(e.clientY - gesture.startY);
+    const swipeLike = dy > 12 && dy >= dx;
+    const elapsed = performance.now() - gesture.startAt;
+    const isTap = !gesture.moved && !swipeLike && gesture.intent !== "vertical" && gesture.intent !== "horizontal" && elapsed < 250;
+    overlayGestureRef.current.pointerId = null;
+    if (isTap) togglePlay();
+  };
+
+  const handleOverlayPointerCancel = () => {
+    overlayGestureRef.current.pointerId = null;
+  };
+
   // Start playing if autoplay — trigger pre-roll first (skip for Premium)
   useEffect(() => {
     if (autoplay && videoRef.current && videoUrl) {
@@ -434,6 +583,10 @@ export default function VideoPlayer({
   // Cleanup ads on unmount
   useEffect(() => {
     return () => {
+      if (startupRetryRef.current) {
+        clearInterval(startupRetryRef.current);
+        startupRetryRef.current = null;
+      }
       destroyAds();
     };
   }, [destroyAds]);
@@ -445,17 +598,18 @@ export default function VideoPlayer({
     <div
       ref={containerRef}
       className={`relative w-full bg-black overflow-hidden select-none group ${
-        isFullscreen ? "rounded-none !h-screen !w-screen" : "aspect-video rounded-radius-lg"
+        isFullscreen ? "fixed inset-0 z-[120] rounded-none !w-screen" : "aspect-video rounded-radius-lg"
       }`}
+      style={isFullscreen ? { width: `${viewportWidth}px`, height: `${viewportHeight}px` } : undefined}
       onMouseMove={handleMouseMove}
       onMouseLeave={() => playing && setShowControls(false)}
     >
       {/* Video element */}
       <video
         ref={videoRef}
-        className="absolute inset-0 w-full h-full object-contain"
+        className={`absolute inset-0 w-full h-full ${isFullscreen ? "object-cover" : "object-contain"}`}
         poster={`${thumbnailUrl}?v=2`}
-        preload="metadata"
+        preload="auto"
         playsInline
         onTimeUpdate={handleTimeUpdate}
         onEnded={handleVideoEnded}
@@ -466,17 +620,39 @@ export default function VideoPlayer({
         }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        onWaiting={() => setIsBuffering(true)}
-        onCanPlay={() => setIsBuffering(false)}
-        onCanPlayThrough={() => {
-          setCanPlayThrough(true);
+        onWaiting={() => {
+          const startedAt = startupStartedAtRef.current ?? 0;
+          const inStartupBurst = startedAt > 0 && performance.now() - startedAt < 500;
+          if (!inStartupBurst || firstFrameDrawnRef.current) {
+            setIsBuffering(true);
+          }
+        }}
+        onCanPlay={() => {
           setIsBuffering(false);
-          // If play was deferred waiting for enough data, start now
           if (pendingPlayRef.current) {
             pendingPlayRef.current = false;
             videoRef.current?.play().catch(() => {});
             setPlaying(true);
             playStartTimeRef.current = Date.now();
+            if (startupRetryRef.current) {
+              clearInterval(startupRetryRef.current);
+              startupRetryRef.current = null;
+            }
+          }
+        }}
+        onLoadedData={() => {
+          setFirstFrameReady(true);
+          firstFrameDrawnRef.current = true;
+          setIsBuffering(false);
+          if (pendingPlayRef.current) {
+            pendingPlayRef.current = false;
+            videoRef.current?.play().catch(() => {});
+            setPlaying(true);
+            playStartTimeRef.current = Date.now();
+            if (startupRetryRef.current) {
+              clearInterval(startupRetryRef.current);
+              startupRetryRef.current = null;
+            }
           }
         }}
         onSeeking={() => setIsBuffering(true)}
@@ -502,8 +678,12 @@ export default function VideoPlayer({
       {/* Play button overlay (before first play) */}
       {!hasStarted && (
         <button
-          onClick={togglePlay}
+          onPointerDown={handleOverlayPointerDown}
+          onPointerMove={handleOverlayPointerMove}
+          onPointerUp={handleOverlayPointerUp}
+          onPointerCancel={handleOverlayPointerCancel}
           className="absolute inset-0 flex items-center justify-center z-10 cursor-pointer bg-black/30"
+          style={{ touchAction: isFullscreen ? "none" : "pan-y" }}
           aria-label="Play"
         >
           <div className="w-20 h-20 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center hover:bg-black/70 transition-colors">
@@ -524,8 +704,12 @@ export default function VideoPlayer({
       {/* Click to play/pause (after started, not during ad) */}
       {hasStarted && adPhase !== "playing" && (
         <button
-          onClick={togglePlay}
+          onPointerDown={handleOverlayPointerDown}
+          onPointerMove={handleOverlayPointerMove}
+          onPointerUp={handleOverlayPointerUp}
+          onPointerCancel={handleOverlayPointerCancel}
           className="absolute inset-0 z-10 cursor-pointer"
+          style={{ touchAction: isFullscreen ? "none" : "pan-y" }}
           aria-label={playing ? "Pause" : "Play"}
         />
       )}

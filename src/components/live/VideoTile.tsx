@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Camera, CameraOff, Mic, MicOff, Crown, Trophy, Gift, Wifi, WifiOff } from "lucide-react";
+import { Camera, CameraOff, Mic, MicOff, Crown, Trophy, Gift } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatCredits } from "@/lib/utils";
 import type { User } from "@/lib/types";

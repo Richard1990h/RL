@@ -12,6 +12,7 @@ interface RateLimitEntry {
 
 const store = new Map<string, RateLimitEntry>();
 
+// Note: Module-level interval is intentional for long-running server. In serverless, this runs per cold start.
 // Clean up stale entries every 5 minutes
 setInterval(() => {
   const now = Date.now();
@@ -51,4 +52,8 @@ export function checkRateLimit(
 
   entry.timestamps.push(now);
   return true; // Allowed
+}
+
+export function resetRateLimitStoreForTests() {
+  store.clear();
 }

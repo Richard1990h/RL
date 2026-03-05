@@ -3,7 +3,6 @@
 import { useRef, useCallback, useState, useEffect } from "react";
 
 // Google's sample pre-roll tag (guaranteed to return a test ad).
-// Once ads are confirmed working, replace with the real AdSense for Video tag.
 const GOOGLE_TEST_TAG =
   "https://pubads.g.doubleclick.net/gampad/ads?iu=/21775744923/external/single_preroll_skippable&sz=640x480&ciu_szs=300x250%2C728x90&gdfp_req=1&output=vast&unviewed_position_start=1&env=vp&impl=s&correlator=";
 
@@ -28,8 +27,7 @@ function buildAdTagUrl(): string {
 }
 
 // Toggle: set to true to use the Google test ad, false for real AdSense/GAM ads.
-// Switch to false once you have a real VAST tag from Google Ad Manager.
-const USE_TEST_TAG = true;
+const USE_TEST_TAG = process.env.NODE_ENV !== "production";
 
 interface UseImaAdsOptions {
   videoRef: React.RefObject<HTMLVideoElement | null>;
@@ -60,6 +58,7 @@ export function useImaAds({
   const adsManagerRef = useRef<google.ima.AdsManager | null>(null);
   const adDisplayContainerRef = useRef<google.ima.AdDisplayContainer | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const skipTriggeredRef = useRef(false);
 
   // Stable callback refs to avoid stale closures
   const onAdsCompleteRef = useRef(onAdsComplete);
@@ -70,7 +69,8 @@ export function useImaAds({
   }, [onAdsComplete, onAdError]);
 
   const handleAdComplete = useCallback(() => {
-    console.log("[IMA] Ad complete — resuming content");
+    if (skipTriggeredRef.current) return;
+    skipTriggeredRef.current = true;
     setIsAdPlaying(false);
     adsManagerRef.current?.destroy();
     adsManagerRef.current = null;
@@ -78,50 +78,40 @@ export function useImaAds({
   }, []);
 
   const handleAdError = useCallback(() => {
-    console.warn("[IMA] Ad error — skipping to content");
+    if (skipTriggeredRef.current) return;
+    skipTriggeredRef.current = true;
     setIsAdPlaying(false);
     adsManagerRef.current?.destroy();
     adsManagerRef.current = null;
     onAdErrorRef.current();
   }, []);
 
-  const retryCountRef = useRef(0);
-
   const requestAds = useCallback(async () => {
-    console.log("[IMA] requestAds called, google.ima available:", !!window.google?.ima);
+    skipTriggeredRef.current = false;
 
-    // If IMA SDK hasn't loaded yet, retry a few times (it loads async)
+    // If IMA SDK has not loaded yet, retry briefly then fail open.
+    let retries = 0;
+    while (!window.google?.ima && retries < 10) {
+      retries++;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
     if (!window.google?.ima) {
-      if (retryCountRef.current < 10) {
-        retryCountRef.current++;
-        console.log(`[IMA] SDK not ready, retry ${retryCountRef.current}/10...`);
-        setTimeout(() => requestAds(), 300);
-        return;
-      }
-      // SDK never loaded (ad blocker or network issue) — skip ads
-      console.warn("[IMA] SDK never loaded after 10 retries — ad blocker?");
-      retryCountRef.current = 0;
       onAdErrorRef.current();
       return;
     }
-    retryCountRef.current = 0;
 
     const video = videoRef.current;
     const adContainer = adContainerRef.current;
     if (!video || !adContainer) {
-      console.warn("[IMA] Missing video or adContainer ref");
       onAdErrorRef.current();
       return;
     }
-
-    console.log("[IMA] Ad container size:", adContainer.clientWidth, "x", adContainer.clientHeight);
 
     try {
       // Initialize ad display container (requires user gesture context)
       const adDisplayContainer = new google.ima.AdDisplayContainer(adContainer, video);
       adDisplayContainer.initialize();
       adDisplayContainerRef.current = adDisplayContainer;
-      console.log("[IMA] AdDisplayContainer initialized");
 
       const adsLoader = new google.ima.AdsLoader(adDisplayContainer);
       adsLoaderRef.current = adsLoader;
@@ -129,7 +119,6 @@ export function useImaAds({
       adsLoader.addEventListener(
         google.ima.AdsManagerLoadedEvent.Type.ADS_MANAGER_LOADED,
         ((e: google.ima.AdsManagerLoadedEvent) => {
-          console.log("[IMA] AdsManager loaded successfully");
           const settings = new google.ima.AdsRenderingSettings();
           settings.restoreCustomPlaybackStateOnAdBreakComplete = true;
 
@@ -137,7 +126,6 @@ export function useImaAds({
           adsManagerRef.current = adsManager;
 
           adsManager.addEventListener(google.ima.AdEvent.Type.CONTENT_PAUSE_REQUESTED, () => {
-            console.log("[IMA] CONTENT_PAUSE_REQUESTED — ad is playing");
             setIsAdPlaying(true);
             trackImpression(videoId);
           });
@@ -145,14 +133,12 @@ export function useImaAds({
           adsManager.addEventListener(google.ima.AdEvent.Type.ALL_ADS_COMPLETED, handleAdComplete);
           adsManager.addEventListener(google.ima.AdEvent.Type.COMPLETE, handleAdComplete);
           adsManager.addEventListener(google.ima.AdEvent.Type.SKIPPED, handleAdComplete);
-          adsManager.addEventListener(google.ima.AdEvent.Type.AD_ERROR, (evt: any) => {
-            console.error("[IMA] Ad playback error:", evt?.getError?.()?.getMessage?.() || evt);
+          adsManager.addEventListener(google.ima.AdEvent.Type.AD_ERROR, () => {
             handleAdError();
           });
 
           // Size the ad to match the container
           const { clientWidth: w, clientHeight: h } = adContainer;
-          console.log("[IMA] Starting ad at size:", w, "x", h);
           adsManager.init(w, h, google.ima.ViewMode.NORMAL);
           adsManager.start();
 
@@ -172,8 +158,7 @@ export function useImaAds({
 
       adsLoader.addEventListener(
         google.ima.AdErrorEvent.Type.AD_ERROR,
-        ((evt: any) => {
-          console.error("[IMA] AdsLoader error:", evt?.getError?.()?.getMessage?.() || evt);
+        (() => {
           handleAdError();
         }) as (e: google.ima.AdsManagerLoadedEvent | google.ima.AdErrorEvent) => void,
       );
@@ -201,23 +186,21 @@ export function useImaAds({
       const customServeUrl = videoId
         ? `/api/ads/custom/serve?videoId=${encodeURIComponent(videoId)}`
         : "/api/ads/custom/serve";
-      const tagUrl = useCustom
+      adsRequest.adTagUrl = useCustom
         ? customServeUrl
         : USE_TEST_TAG
           ? GOOGLE_TEST_TAG
           : buildAdTagUrl();
-      adsRequest.adTagUrl = tagUrl;
 
-      console.log(`[IMA] Mix=${mixPercent}%, requesting ads with tag:`, tagUrl.substring(0, 80) + "...");
       setIsAdPlaying(true);
       adsLoader.requestAds(adsRequest);
-    } catch (err) {
-      console.error("[IMA] Exception in requestAds:", err);
+    } catch {
       handleAdError();
     }
   }, [videoRef, adContainerRef, handleAdComplete, handleAdError, videoId]);
 
   const destroyAds = useCallback(() => {
+    skipTriggeredRef.current = true;
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
     adsManagerRef.current?.destroy();

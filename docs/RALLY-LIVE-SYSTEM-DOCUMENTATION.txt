@@ -1,0 +1,1455 @@
+================================================================================
+                    RALLY LIVE - COMPLETE SYSTEM DOCUMENTATION
+================================================================================
+                         Last Updated: March 4, 2026
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+  1.  Platform Overview
+  2.  Technology Stack
+  3.  Database Schema Overview
+  4.  Authentication System
+  5.  Banking & Credit System (Core Financial Architecture)
+  6.  Credit Ledger (Double-Entry Accounting)
+  7.  PayPal Purchase Flow
+  8.  Withdrawal Flow
+  9.  Credit Transfers
+  10. Donation System (Live Streams)
+  11. Donation Tiers & Gift Catalog
+  12. Game Gifts & Power-Ups
+  13. Treasury & Platform Revenue
+  14. Ad Revenue System
+  15. Service Marketplace Payments
+  16. Message Streaks & Bonuses
+  17. FiveM Website Subscriptions
+  18. All Pages & Routes
+  19. Live Streaming System
+  20. Battle & Game Systems
+  21. Video Upload & Processing
+  22. Social & Friends System
+  23. Messaging System
+  24. Notification System
+  25. Creator Tools
+  26. Admin Panel
+  27. FiveM Integration
+  28. Offline & PWA Support
+  29. Security & Anti-Fraud
+  30. Feature Dependencies Map
+
+
+================================================================================
+1. PLATFORM OVERVIEW
+================================================================================
+
+Rally Live (rallylive.ca) is a live streaming, video sharing, and competitive
+gaming platform. Think of it as a combination of Twitch (live streaming),
+YouTube (video hosting), Snapchat (messaging), and a custom economy system
+where credits flow between viewers, creators, and the platform.
+
+Core pillars:
+  - Live streaming with interactive game modes (battles, trivia, auctions)
+  - Video hosting with upload, series, and recommendations
+  - Real-time credit economy (donations, gifts, power-ups, services)
+  - Social features (friends, messaging, notifications, follows)
+  - Creator monetization (donations, ads, services marketplace)
+  - FiveM/GTA RP server management websites
+  - Progressive Web App with offline support
+
+
+================================================================================
+2. TECHNOLOGY STACK
+================================================================================
+
+Frontend:
+  - Next.js (App Router) with TypeScript
+  - Zustand for state management
+  - Tailwind CSS for styling
+  - Google IMA SDK for video ads
+  - Web Audio API for sound effects
+  - Service Worker for offline/PWA
+
+Backend:
+  - Next.js API routes (serverless functions)
+  - Prisma ORM with MySQL database
+  - JWT-based authentication (httpOnly cookies)
+  - PayPal REST API for payments
+  - FFmpeg for video processing
+  - SSE (Server-Sent Events) for real-time game state
+  - RTMP ingest / HLS playback for live streams
+
+Infrastructure:
+  - Cloudflare Tunnel for stream delivery
+  - Local file storage for videos/uploads
+  - Bridge system for desktop app communication
+
+
+================================================================================
+3. DATABASE SCHEMA OVERVIEW
+================================================================================
+
+The MySQL database contains 40+ models organized into these domains:
+
+USERS & AUTH:
+  User              - Core user account (email, username, roles, flags)
+  Session           - JWT sessions with 30-day expiry
+
+WALLET & CREDITS:
+  Wallet            - User balance (credits, totalEarned, totalSpent)
+  Transaction       - User-facing transaction history
+  CreditLedger      - Double-entry accounting entries
+  PlatformSettings  - Configurable fees and rates (singleton)
+
+CONTENT:
+  Video             - Uploaded videos with metadata
+  VideoView         - Unique view tracking (per user + IP)
+  Series            - Video series/playlists
+  Comment           - Video comments with threading
+  CommentLike       - Comment upvotes
+  Like              - Video likes/dislikes
+
+SOCIAL:
+  Follow            - User follows (follower/following)
+  Block             - User blocks
+  FriendRequest     - Friend request lifecycle
+  Friendship        - Confirmed friendships
+  FriendTimeout     - Notification mute timers
+
+MESSAGING:
+  Message           - Direct messages (text, image, video, audio)
+  MessageStreak     - Consecutive day messaging streaks
+
+LIVE STREAMING:
+  LiveStream        - Stream sessions with mode/settings
+  LiveParticipant   - Viewers, guests, hosts in streams
+  LiveChatMessage   - Chat messages (including donations)
+  Moderator         - Stream moderators
+  Recording         - Stream recordings
+  EditorProject     - Video editor state
+
+BATTLES & GAMES:
+  PowerUp           - Purchased power-ups with expiration
+  BattleInvitation  - Cross-stream battle invites
+
+SERVICES & ADS:
+  Service           - Creator marketplace listings
+  ServiceOrder      - Service purchase orders
+  Subscription      - Premium subscriptions
+  AdSettings        - Per-creator ad configuration
+  CustomAd          - User-submitted advertisements
+  AdImpressionLog   - Ad view tracking with revenue split
+
+MODERATION:
+  Report            - User/content reports
+  BugReport         - Platform bug reports
+  Notification      - All notification types
+
+FIVEM:
+  FivemServer                 - GTA RP server profiles
+  FivemServerMember           - Server membership/roles
+  FivemServerJob              - Whitelist-only jobs
+  FivemServerPage             - Custom website pages
+  FivemServerVipPackage       - VIP subscription tiers
+  FivemServerVipPurchase      - VIP purchases
+  FivemWebsiteSubscription    - Monthly website billing
+  FivemWhitelistApplication   - Department applications
+  FivemBugReport              - In-game bug reports
+  FivemSuggestion             - In-game feature suggestions
+  FivemAdminComment           - Admin comments on bugs/suggestions
+  StreamWhitelist             - Stream access control
+
+
+================================================================================
+4. AUTHENTICATION SYSTEM
+================================================================================
+
+Type: JWT-based with httpOnly secure cookies
+
+REGISTRATION (POST /api/auth/register):
+  - Fields: email, username, displayName, password, dateOfBirth
+  - Age gate: Must be 13+ years old
+  - Rate limits: 10/hour per IP, 5/hour per email
+  - Auto-creates wallet with 0 credits
+  - Creates disk storage folders for user files
+  - Password hashed with bcryptjs (12 rounds)
+
+LOGIN (POST /api/auth/login):
+  - Rate limits: 25/10min per IP, 10/10min per email
+  - "Remember me" option for 30-day sessions
+  - Returns user profile with wallet balance
+  - Audit logs failed attempts
+
+GOOGLE OAUTH (GET /api/auth/callback/google):
+  - Exchanges authorization code for Google tokens
+  - Auto-creates user if new (generates unique username)
+  - Updates avatar from Google profile picture
+  - Sets session cookie
+
+SESSION MANAGEMENT:
+  - JWT token stored in httpOnly, secure, sameSite=lax cookie
+  - 30-day expiry
+  - Token validated on every authenticated request
+  - requireAuth() helper used across all protected routes
+  - Owner accounts have additional device gating
+
+
+================================================================================
+5. BANKING & CREDIT SYSTEM (Core Financial Architecture)
+================================================================================
+
+FUNDAMENTAL RULE: 1 credit = $0.01 USD
+
+All credits are stored as integers (no fractions). The system uses a
+three-layer financial architecture:
+
+Layer 1 - WALLET (Balance)
+  Model: Wallet
+  Fields: credits (current balance), totalEarned, totalSpent
+  Rule: One wallet per user, auto-created on registration
+  Read: GET /api/wallet returns balance + last 50 transactions
+
+Layer 2 - TRANSACTIONS (History)
+  Model: Transaction
+  Purpose: User-facing transaction log
+  Types: DEPOSIT, WITHDRAWAL, CREDIT_PURCHASE, CREDIT_SPENT,
+         CREDIT_EARNED, DONATION, SUBSCRIPTION, AD_REVENUE,
+         SERVICE_PAYMENT, SERVICE_PAYOUT, STREAK_BONUS, CREDIT_TRANSFER
+  Statuses: PENDING, COMPLETED, FAILED, REFUNDED
+
+Layer 3 - CREDIT LEDGER (Audit Trail)
+  Model: CreditLedger
+  Purpose: Bank-grade double-entry accounting
+  Rule: Every credit mutation MUST create a ledger entry
+  Constraint: @@unique([type, referenceId]) prevents duplicate processing
+  Types: PAYPAL_PURCHASE, STRIPE_PURCHASE, TRANSFER_IN, TRANSFER_OUT,
+         SPEND, WITHDRAW, ADJUSTMENT, REVERSAL, ADMIN_GRANT,
+         DONATION_IN, DONATION_OUT, SERVICE_PAYMENT, SERVICE_EARNING,
+         SERVICE_REFUND, MESSAGE_COST, PLATFORM_FEE_PENDING,
+         PLATFORM_FEE_SETTLED, AD_PURCHASE, AD_REFUND,
+         AD_IMPRESSION_EARNING, AD_CREATOR_PAYOUT, GAME_GIFT_OUT,
+         GAME_GIFT_IN, GAME_HOST_CUT, GAME_PAYOUT
+
+HOW CREDITS FLOW:
+
+  Credits Enter the System:
+    - PayPal purchase (real money -> credits)
+    - Admin grant (manual adjustment)
+    - Streak bonus (automatic reward)
+
+  Credits Move Between Users:
+    - Donations in live streams (viewer -> host, with platform cut)
+    - Game gifts (viewer -> player, with host cut)
+    - Credit transfers (user -> user, no fee)
+    - Service payments (buyer -> seller)
+    - Message streak bonuses (system -> both users)
+
+  Credits Leave the System:
+    - Withdrawals (credits -> PayPal payout)
+    - Ad purchases (credits -> ad impressions)
+    - FiveM website subscriptions (credits -> service)
+    - Power-up purchases (credits -> game effects)
+
+  Platform Revenue Streams:
+    - Purchase fees (5% on custom amounts)
+    - Withdrawal fees (2%, min $0.25)
+    - Donation platform cut (20% default, configurable)
+    - Ad impression fees
+    - FiveM website fees
+
+
+================================================================================
+6. CREDIT LEDGER (Double-Entry Accounting)
+================================================================================
+
+File: src/lib/credit-ledger.ts
+
+The ledger is the backbone of all financial operations. Every credit mutation
+follows this pattern:
+
+  1. Check idempotency (has this referenceId+type been processed?)
+  2. Open prisma.$transaction()
+  3. Create CreditLedger entry with signed delta
+  4. Update Wallet.credits atomically
+  5. Commit or rollback
+
+KEY FUNCTIONS:
+
+  insertLedgerEntry(tx, entry):
+    - For CREDITS (positive delta):
+      UPDATE Wallet SET credits = credits + ? WHERE userId = ?
+    - For DEBITS (negative delta):
+      UPDATE Wallet SET credits = credits - ? WHERE userId = ? AND credits >= ?
+      (Race-safe conditional prevents overdraft)
+    - Throws error if insufficient balance
+
+  insertLedgerEntries(tx, entries):
+    - Batch insert for paired entries (e.g., TRANSFER_OUT + TRANSFER_IN)
+    - Processes sequentially within single transaction
+
+  ledgerEntryExists(referenceId, type):
+    - Fast idempotency check before starting transaction
+    - Returns boolean
+
+IDEMPOTENCY STRATEGY:
+  - @@unique([type, referenceId]) at database level
+  - External IDs used as referenceId (e.g., PayPal orderID)
+  - If entry exists, return success without reprocessing
+  - Prevents double-mint from network retries
+
+
+================================================================================
+7. PAYPAL PURCHASE FLOW
+================================================================================
+
+Step 1: CREATE ORDER (POST /api/paypal/create-order)
+  - Rate limit: 10 orders per user per 10 minutes
+  - Minimum: $0.50, Maximum: $500.00
+  - Preset packages:
+      100 credits  = $0.99
+      500 credits  = $4.99
+      1000 credits = $9.99
+      5000 credits = $39.99
+  - Custom amounts also supported
+  - Creates PayPal order via REST API
+  - Returns orderID for frontend PayPal button
+
+Step 2: CAPTURE ORDER (POST /api/paypal/capture-order)
+  - Rate limit: 5 captures per user per 10 minutes
+  - Idempotency check: If ledger entry exists for orderID, return success
+  - Captures payment via PayPal API
+  - Fee calculation for custom amounts:
+      PayPal processing: 3.49% + $0.49
+      Platform fee: 5% (configurable via PlatformSettings)
+      Net credits = floor(amount - total fees)
+  - Preset packages: No visible fee (baked into price)
+  - Maximum: 50,000 credits per transaction
+
+  Atomic transaction:
+    1. Create Transaction record (CREDIT_PURCHASE, COMPLETED)
+    2. Insert CreditLedger entry (PAYPAL_PURCHASE, referenceId = orderID)
+    3. Update Wallet.credits
+    4. Update Wallet.totalSpent
+    5. Audit log entry
+
+PayPal Integration Files:
+  - src/lib/paypal.ts (getAccessToken, createOrder, captureOrder)
+  - Environment: PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_MODE
+
+
+================================================================================
+8. WITHDRAWAL FLOW
+================================================================================
+
+Endpoint: POST /api/wallet/withdraw
+
+Requirements:
+  - Minimum: 500 credits ($5.00)
+  - Must have sufficient wallet balance
+  - Owner accounts skip all fees
+
+Fee Calculation:
+  Fee = max(ceil(grossCredits * withdrawalFeePct / 100), withdrawalFeeMinCents)
+  Default: 2% with $0.25 minimum
+  Example: 1000 credits ($10) -> 2% fee = $0.20 -> net = $9.80
+
+Atomic Transaction:
+  1. Create Transaction (WITHDRAWAL, PENDING)
+  2. Insert CreditLedger (WITHDRAW, referenceId = transactionId)
+  3. If non-owner: Credit treasury with fee amount
+     - Insert CreditLedger (PLATFORM_FEE_PENDING)
+     - Update treasury user's totalEarned
+  4. Deduct from Wallet.credits
+
+Result: User receives PayPal payout to their email (1-3 business days)
+
+Fee Config (GET /api/wallet/fees):
+  Returns: withdrawalFeePct, withdrawalFeeMinCents, purchaseFeePct
+  Source: PlatformSettings singleton
+
+
+================================================================================
+9. CREDIT TRANSFERS
+================================================================================
+
+Endpoint: POST /api/wallet/transfer
+
+Validation:
+  - Amount must be positive integer
+  - Sender must have sufficient balance
+  - Cannot transfer to self
+  - Receiver must exist
+
+Process:
+  1. Ensure receiver wallet exists (upsert)
+  2. Create Transaction records for both users
+  3. Insert double-entry ledger:
+     - TRANSFER_OUT: sender  -amount (referenceId = txId)
+     - TRANSFER_IN:  receiver +amount (referenceId = txId)
+  4. Atomic balance updates
+  No fees charged on transfers.
+
+
+================================================================================
+10. DONATION SYSTEM (Live Streams)
+================================================================================
+
+Endpoint: POST /api/live/[id]/chat (with isDonation=true)
+
+Parameters:
+  - text: Chat message content
+  - isDonation: true
+  - creditAmount: 1 to 100,000
+
+Host Cut System:
+  - Default: 80% to host, 20% to platform
+  - Configurable per stream via LiveStream.hostCutPercent (0-100)
+  - hostShare = floor(creditAmount * hostCutPercent / 100)
+  - platformShare = creditAmount - hostShare
+
+Validation:
+  - Stream must be LIVE
+  - Sender must not be blocked by host
+  - Sender must have sufficient balance
+  - Amount must be 1-100,000 credits
+
+Atomic Transaction:
+  1. Ensure host wallet exists
+  2. Create Transaction for donor (DONATION, creditAmount)
+  3. Create Transaction for host (CREDIT_EARNED, hostShare)
+  4. Insert ledger entries:
+     - DONATION_OUT: donor   -creditAmount
+     - DONATION_IN:  host    +hostShare
+     - PLATFORM_FEE: treasury +platformShare (if applicable)
+  5. Update donor.totalSpent, host.totalEarned
+  6. Create LiveChatMessage with isDonation=true, creditAmount
+
+The donation appears in chat with the sender's name and amount.
+The host receives their cut instantly in their wallet.
+
+
+================================================================================
+11. DONATION TIERS & GIFT CATALOG
+================================================================================
+
+File: src/lib/donation-tiers.ts
+
+DONATION TIERS (13 tiers used in live streams):
+
+  ID       | Name     | Value   | Icon | Category   | Animation
+  ---------|----------|---------|------|------------|----------
+  wave     | Wave     | $0.01   |  👋  | Reactions  | none
+  thumbs   | Thumbs   | $0.05   |  👍  | Reactions  | none
+  clap     | Clap     | $0.10   |  👏  | Reactions  | none
+  heart    | Heart    | $0.25   |  ❤️  | Reactions  | none
+  laugh    | Laugh    | $0.50   |  😂  | Reactions  | none
+  fire     | Fire     | $1.00   |  🔥  | Standard   | sparkle
+  star     | Star     | $2.50   |  ⭐  | Standard   | sparkle
+  bolt     | Bolt     | $5.00   |  ⚡  | Standard   | sparkle
+  diamond  | Diamond  | $10.00  |  💎  | Premium    | sparkle
+  crown    | Crown    | $25.00  |  👑  | Premium    | explosion
+  rocket   | Rocket   | $50.00  |  🚀  | Premium    | explosion
+  trophy   | Trophy   | $100.00 |  🏆  | Legendary  | takeover
+  comet    | Comet    | $250.00 |  ☄️  | Legendary  | takeover
+  galaxy   | Galaxy   | $500.00 |  🌌  | Legendary  | takeover
+
+Animation Types:
+  - none: Simple message in chat
+  - sparkle: Small particle effect, 2.5s duration
+  - explosion: Large particle burst, 4s duration with shockwave
+  - takeover: Full-screen dark overlay, 6s duration
+
+GIFT CATALOG (Wallet page):
+  Items like Rubber Duck, Pizza, Party Popper, Gold Ring, Crown,
+  Moon, Comet, Nebula, Clover, Infinity Gem
+  Priced 1-10,000 credits, filterable by category
+
+TOWER WARS INTEGRATION:
+  Each donation tier maps to unit stats (HP, damage, speed).
+  Sending a gift in Tower Wars spawns a unit for the supported player.
+  Wave-Fire: Attack units (varying stats)
+  Star-Diamond: Healing units
+  Crown+: High-damage attack units
+
+
+================================================================================
+12. GAME GIFTS & POWER-UPS
+================================================================================
+
+GAME GIFTS (POST /api/live/[id]/game/gift):
+  Parameters: tierId, supportingId (player to help), amount
+  Host cut applied same as donations (default 80%)
+  Ledger entries:
+    - GAME_GIFT_OUT: Donor -amount
+    - GAME_HOST_CUT: Host +hostShare
+  Broadcasts to game engine for unit spawn/heal
+
+POWER-UPS (POST /api/live/[id]/game/power-up):
+
+  Type            | Cost  | Duration | Effect
+  ----------------|-------|----------|-------------------------------
+  Boosting Glove  | 500   | 10s      | 5x score multiplier for self
+  Magic Mist      | 300   | 15s      | Hides opponent's score ("???")
+  Stun Hammer     | 400   | 5s       | Visual distortion on opponent
+  Time Maker      | 1000  | Instant  | Adds 10s to round timer
+
+  - Time Maker limited to 5 uses per battle
+  - Power-ups stored in database with expiration timestamps
+  - Active power-ups checked in real-time during game ticks
+  - Credits deducted immediately on purchase
+  - Sound effects generated via Web Audio API
+
+
+================================================================================
+13. TREASURY & PLATFORM REVENUE
+================================================================================
+
+File: src/lib/treasury.ts
+
+The treasury is the platform owner's wallet, identified by isOwner=true.
+
+Revenue Sources:
+  1. PayPal purchase fees (5% on custom amounts)
+  2. Withdrawal fees (2% min $0.25, non-owner only)
+  3. Donation platform cut (20% default)
+  4. Game gift platform cut (same as donations)
+  5. Ad impression fees
+  6. Service marketplace fees
+  7. FiveM website subscription fees
+
+getTreasuryUserId(tx?):
+  - Finds user where isOwner = true
+  - Caches result in module scope
+  - Used inside atomic transactions
+
+Fee Distribution Example (Donation):
+  Viewer donates 1000 credits ($10)
+  Host cut: 80% = 800 credits to host
+  Platform: 20% = 200 credits to treasury
+
+Fee Distribution Example (Withdrawal):
+  User withdraws 1000 credits ($10)
+  Fee: 2% = 20 credits to treasury (min $0.25)
+  Payout: 980 credits ($9.80) to PayPal
+
+
+================================================================================
+14. AD REVENUE SYSTEM
+================================================================================
+
+CUSTOM AD MARKETPLACE:
+
+Submission:
+  - Creators submit video ads (title, video URL, duration)
+  - Pay creditsPaid upfront (default 5000 credits submission fee)
+  - Status: PENDING_REVIEW -> APPROVED/REJECTED
+  - Optional: maxImpressions cap, expiresAt date
+
+Serving (GET /api/ads/custom/serve):
+  - Rate limited: 30 req/min per IP
+  - Weighted random selection by credits remaining
+  - Returns VAST 3.0 XML with 10-second skip offset
+  - Per impression: deducts costPerImpression from ad balance
+
+Revenue Share (follower-based):
+  Followers    | Creator Share | Platform Share
+  -------------|---------------|---------------
+  20,000+      | 80%           | 20%
+  10,000+      | 50%           | 50%
+  Under 10,000 | 10%           | 90%
+
+PER-CREATOR AD SETTINGS (AdSettings model):
+  - adsPerVideo: Number of ads per video (default 1)
+  - adsPerLiveHour: Ads per live stream hour (default 2)
+  - creditsToSkip: Credits viewers pay to skip ads (default 200)
+  - revenueSharePct: Creator's revenue share percentage
+
+AD IMPRESSION TRACKING (AdImpressionLog model):
+  - Records every ad view with full revenue split
+  - Tracks paidOut status for payout scheduling
+  - adPayoutDay in PlatformSettings (0 = manual only)
+
+
+================================================================================
+15. SERVICE MARKETPLACE PAYMENTS
+================================================================================
+
+Endpoint: POST /api/services (create), /api/services/[id]/order (purchase)
+
+Service Categories:
+  COACHING, VIDEO_REVIEW, CUSTOM_CONTENT, SHOUTOUT, COLLABORATION, OTHER
+
+Payment Flow:
+  1. Buyer places order (ServiceOrder created, status: PENDING)
+  2. Credits held: Buyer's wallet debited
+     - Ledger: SERVICE_PAYMENT (buyer -priceCredits)
+  3. Seller accepts and delivers
+  4. Buyer confirms completion
+     - Ledger: SERVICE_EARNING (seller +priceCredits)
+  5. On dispute/cancellation:
+     - Ledger: SERVICE_REFUND (buyer +priceCredits)
+
+Order Statuses:
+  PENDING -> ACCEPTED -> IN_PROGRESS -> DELIVERED -> COMPLETED
+  Or: PENDING -> CANCELLED / DISPUTED
+
+
+================================================================================
+16. MESSAGE STREAKS & BONUSES
+================================================================================
+
+Model: MessageStreak
+
+How it works:
+  - Two users who message each other on consecutive days build a streak
+  - Streak tracked via lastMessage timestamp and streakDays counter
+  - bonusesPaid tracks how many milestone rewards have been given
+
+Milestone Rewards:
+  Day 5:  5 credits to both users
+  Day 10: 10 credits to both users
+  Day 15: 15 credits to both users
+  Day 20: 20 credits to both users
+  Day 25: 25 credits to both users
+  Day 30: 500 credits ($5.00) to both users
+
+Ledger: STREAK_BONUS type for both users
+Transaction: STREAK_BONUS type
+
+
+================================================================================
+17. FIVEM WEBSITE SUBSCRIPTIONS
+================================================================================
+
+Model: FivemWebsiteSubscription
+
+How it works:
+  - Users pay credits to host a FiveM server management website
+  - 200 credits to create + recurring monthly charge
+  - Billing tracked via nextBillingAt timestamp
+  - Status: ACTIVE, PAUSED, CANCELLED, PAST_DUE
+  - PayPal order/capture IDs stored for payment reference
+
+VIP Packages (FivemServerVipPackage):
+  - Server owners create VIP tiers with credit pricing
+  - Users purchase with credits (FivemServerVipPurchase)
+  - Duration-based (default 30 days)
+  - Benefits stored as JSON array
+
+
+================================================================================
+18. ALL PAGES & ROUTES
+================================================================================
+
+PUBLIC PAGES:
+  /login                    - Email/password + Google OAuth login
+  /install                  - PWA installation instructions
+  /fivem-whitelist          - FiveM department application form
+
+MAIN APP PAGES (require auth):
+
+  /                         - Home/discover feed
+    Shows: Live Now carousel, category filters, video grid
+    Links to: /live/[id], /watch/[id], /profile/[username]
+
+  /watch/[id]               - Video player page
+    Shows: Video player, comments, creator info, recommendations
+    Features: Like/dislike, gift panel, series episodes, HLS playback
+    Credits: Gift panel sends donations to creator
+
+  /live                     - Live streams discovery
+    Shows: Filter chips (by mode), live stream cards, viewer counts
+    Auto-refreshes every 15 seconds
+    Modes: Standard, Battle, Rooms, Timer Wars, Tower Wars, Trivia,
+           Auction, Spin Wheel, Last Standing
+
+  /live/[id]                - Watch live stream (viewer)
+    Shows: HLS stream, chat, viewer count, elapsed time
+    Features: Chat messages, donation drawer, join queue, follow
+    Credits: Send donations via gift drawer
+
+  /battle/[id]              - Battle room (competitive viewer)
+    Shows: Game-specific UI, participant boxes, leaderboard
+    Features: Power-up shop, split-screen layouts, victory lap
+    Credits: Game gifts, power-up purchases
+    Game modes: Timer Wars, Tower Wars, Trivia, Auction Wars
+
+  /go-live                  - Create/manage live stream (host)
+    Shows: Stream settings, device selector, game mode controls
+    Features: Camera/mic/screen selection, layout editor, chat mod
+    Eligibility: 5 videos + 100 views + 50 likes (or owner)
+    Modes: Standard, Timer Wars, Tower Wars, Rooms, Trivia,
+           Auction, Spin Wheel, Last Standing
+
+  /upload                   - Video upload page
+    Shows: File upload, metadata form, thumbnail selection
+    Features: Chunked upload with progress, tags, series management
+    Processing: FFmpeg encodes 720p + 360p variants
+
+  /upload-stream            - Combined upload/go-live hub
+    Tabs: Upload / Go Live
+    Shows eligibility gate for go-live
+
+  /profile/[username]       - User/creator profile
+    Shows: Avatar, bio, stats, verification badge
+    Tabs: Videos, Series, Liked
+    Features: Follow/unfollow, block/report
+
+  /messages                 - Direct messaging (Snapchat-style)
+    Shows: Message threads, friends list
+    Features: Text/photo/video messages, snap messages (ephemeral),
+              auto-delete options, read receipts, typing indicators,
+              streak tracking, emoji reactions
+    Credits: Message streaks earn bonus credits
+
+  /notifications            - Notification center
+    Types: Follow, like, comment, donation, gift, live_start,
+           battle_invite, message, friend_request, subscription,
+           service_order, system, streak_bonus
+    Filter tabs: All, Mentions, Gifts, System
+    Smart routing: Each type links to relevant page
+
+  /wallet                   - Credits & monetization hub
+    Tab 1 - Buy Credits: PayPal integration, preset/custom amounts
+    Tab 2 - Catalog: Gift shop with emoji items
+    Tab 3 - Withdraw: Cash out earnings, fee breakdown
+    Tab 4 - History: Transaction log with filters
+    Shows: Current balance, USD equivalent, "1 credit = $0.01"
+
+  /credits                  - Redirects to /wallet (legacy alias)
+
+  /creator-studio           - Creator content management
+    Tab 1 - Content: Video list, visibility management, edit/delete
+    Tab 2 - Series: Create/edit series, episode reordering
+    Tab 3 - Live Settings: Stream defaults, moderation, game modes
+    Tab 4 - Moderation: Banned words, slow mode, comment filters
+    Tab 5 - Ads: Custom ad campaign management
+    Tab 6 - Integrations: Streamlabs, YouTube, Discord, PayPal
+
+  /analytics                - Creator performance metrics
+    Shows: Impressions, total videos, followers, revenue
+    Charts: Views over time (monthly bars)
+    Engagement: Like/dislike ratios
+    Live stats: Streams, peak viewers, participants, chat count
+
+  /settings                 - Account & preferences
+    Account: Display name, username, email, bio, avatar, password
+    Preferences: Theme, language, notifications, stream quality
+    Privacy: Profile visibility, online status, DM permissions
+    Embedded: Messages, Creator Studio, Analytics tabs
+
+  /services                 - Gig marketplace
+    Shows: Service listings with categories
+    Features: Create/edit services, order management, ratings
+    Categories: Coaching, Video Review, Custom Content, Shoutout,
+                Collaboration, Other
+    Credits: Service purchases deducted from buyer's wallet
+
+  /fivem                    - FiveM server hub
+    Shows: My servers, discover servers
+    Features: Create website, manage server, VIP packages
+    Credits: 200 credits to create + monthly subscription
+
+  /offline                  - Offline mode information
+    Shows: What works offline vs. requires internet
+    Offline: Queue uploads, edit metadata, browse cached content
+    Online only: Live streams, real-time chat, new videos
+
+  /admin                    - Admin dashboard (owner-only)
+    Shows: Platform stats, user management, treasury
+    Features: Verify/ban users, content moderation, fee config,
+              bridge communication, service approval, bug tracking
+    Stats: Total users, videos, credits in circulation, revenue
+
+
+================================================================================
+19. LIVE STREAMING SYSTEM
+================================================================================
+
+ARCHITECTURE:
+  Ingest: RTMP via Cloudflare Tunnel
+  Playback: HLS (HTTP Live Streaming)
+  Signaling: WebRTC for peer-to-peer connections
+  Real-time: SSE for game state, REST for actions
+
+STREAM LIFECYCLE:
+  1. Creator opens /go-live
+  2. Selects mode, configures settings, picks devices
+  3. POST /api/live creates stream (status: WAITING)
+  4. Stream key generated (rly_live_ + 32-char hex)
+  5. Creator starts broadcasting -> status: LIVE
+  6. Heartbeat every 2 minutes keeps stream alive
+  7. Creator ends stream -> status: ENDED
+  8. Stale detection: Auto-end if no heartbeat for 2+ minutes
+
+STREAM MODES:
+  STANDARD      - Simple broadcast with chat and donations
+  TIMER_WARS    - Timed rounds, lowest score eliminated
+  TOWER_WARS    - Real-time strategy, units march toward bases
+  ROOMS         - Multi-participant rooms
+  TRIVIA        - Multiple choice questions, fastest answer wins
+  AUCTION       - Item bidding with anti-snipe timer
+  SPIN_WHEEL    - Randomized wheel game
+  LAST_STANDING - Elimination until one remains
+
+STREAM SETTINGS:
+  - Title, tags, game selection
+  - Visibility: public, private, followers only
+  - Guest limit: 2-10 participants
+  - Round length: 15-300 seconds
+  - Slow mode: off/5s/10s/30s/60s
+  - Recording toggle
+  - Host cut percentage (0-100%)
+  - Minimum donation amount
+  - Background color/image
+  - Camera-off and mute overlay images
+  - Banned words list, link blocking
+  - Followers-only or subscriber-only chat
+
+VIEWER EXPERIENCE:
+  - HLS stream playback with volume controls
+  - Real-time viewer count
+  - Live elapsed time display
+  - Chat panel with messages and donation highlights
+  - Gift/donation drawer for sending credits
+  - Join queue to request guest participation
+  - Follow creator button
+
+CHAT SYSTEM:
+  - Stored in LiveChatMessage table
+  - Cursor-based pagination for history
+  - Host can block senders (blocked users get 403)
+  - Welcome messages on viewer join
+  - Donation messages highlighted with amount
+  - Moderation: slow mode, banned words, followers-only
+
+RECORDING:
+  - Optional per-stream
+  - States: Recording -> Paused -> Stopped
+  - Duration tracked in real-time
+  - Chunk-based upload on completion
+  - Post-processing for thumbnail generation
+
+
+================================================================================
+20. BATTLE & GAME SYSTEMS
+================================================================================
+
+GAME ENGINE ARCHITECTURE:
+  File: src/lib/games/game-engine.ts
+
+  GameEngine manages:
+    - 100ms tick interval (10 FPS game logic)
+    - Action processing (user inputs)
+    - State broadcasting via SSE
+    - Callbacks: onStateUpdate, onGameEnd, onElimination
+
+  Game State Structure:
+    gameId, streamId, mode, phase, round, maxRounds,
+    timeRemaining, players, winner, data (mode-specific)
+
+  Phases: waiting -> active -> paused -> finished
+
+  SSE Broadcasting:
+    - Full listeners: Complete state every tick
+    - Overlay listeners: Diff updates at ~12 FPS
+    - 15-second heartbeat keepalive
+
+PARTICIPANT ROLES:
+  HOST   - Stream creator, full control (create/start/end game)
+  GUEST  - Approved by host, can submit game actions
+  VIEWER - Can donate/chat, cannot interact with game
+
+GUEST APPROVAL:
+  1. Guest joins with role: "guest"
+  2. Created as PENDING participant
+  3. Host approves -> transitions to ACTIVE
+  4. Only ACTIVE guests can submit game actions
+
+---------- TIMER WARS ----------
+File: src/lib/games/timer-wars-server.ts
+
+Mechanics:
+  - Timed countdown each round
+  - Lowest scorer eliminated at round end
+  - Tied at bottom: all tied players eliminated
+  - Last remaining player wins
+  - Or highest scorer after max rounds
+
+Player State: score, isEliminated, team (optional), rank
+
+Features:
+  - Victory lap: 3-minute celebration after winner
+  - Top gifters tracked (up to 10)
+  - Team mode: aggregate team A vs team B
+  - Specific-gift mode: only certain tiers count
+  - Rejoin queue for eliminated players
+
+Payout:
+  - On elimination: player gets accumulated playerEarnings
+  - Automatic payout via database transaction
+  - Auto-restart after 5 seconds
+
+---------- TOWER WARS ----------
+File: src/lib/games/tower-wars-server.ts
+
+Mechanics:
+  - Units spawn and march toward opponent base (position 0->100)
+  - Combat in center zone (position 40-60)
+  - Units reaching position >= 100 damage target base
+  - Base destroyed = player eliminated
+
+Unit System:
+  - Each gift tier maps to unit stats (HP, damage, speed)
+  - Units tracked with: id, tierId, senderId, supportingId,
+    targetId, hp, maxHp, damage, speed, position
+  - Healing units restore base HP
+
+Game Modes:
+  - V1 Single Tower: One objective, destroyed = instant win
+  - V1 Single Lane: All units on same lane
+  - Legacy Elimination: Multiple players, bases eliminated
+
+Actions:
+  - spawn_unit: Create unit from gift tier
+  - heal: Restore base HP (capped at maxBaseHp)
+
+---------- TRIVIA BATTLE ----------
+File: src/lib/games/trivia-battle.ts
+
+Mechanics:
+  - Host sets questions (typically 5)
+  - Players answer; fastest correct answer = highest score
+  - Scoring: 100 + (timeRemaining * 10) points
+  - First correct: +50 bonus points
+  - Wrong answer: 0 points, marked as answered
+  - 3-second reveal phase between questions
+
+Actions:
+  - set_questions: Host loads question bank
+  - answer: Player submits answerIndex
+  - donate: Score += floor(amount / 2)
+
+---------- AUCTION WARS ----------
+File: src/lib/games/auction-wars.ts
+
+Mechanics:
+  - Items presented one at a time with starting bid
+  - Real-time bidding with countdown
+  - Anti-snipe: Extends timer to 10s if bid in last 5s
+  - Highest bidder wins item
+  - Winner determined by most items won
+
+Actions:
+  - set_items: Initialize auction
+  - bid: Submit new bid (must exceed current high)
+  - donate: Amount added to score
+
+BATTLE INVITATIONS:
+  Endpoint: /api/battle/invite
+  - Search live creators to invite
+  - 5-minute expiration
+  - Optional custom message
+
+LEADERBOARD:
+  - Real-time scoring, sorted by score descending
+  - Top 3 supporters with Gold/Silver/Bronze styling
+  - Top 3 supporters earn free power-ups
+
+SPLIT SCREEN BATTLE:
+  - Left player (blue) vs Right player (red)
+  - Score display with animations
+  - Magic Mist renders score as "???"
+  - Compact variant for mobile
+
+
+================================================================================
+21. VIDEO UPLOAD & PROCESSING
+================================================================================
+
+UPLOAD FLOW:
+  1. User selects file on /upload page
+  2. Frontend chunks file into 10MB pieces
+  3. POST /api/upload/chunk for each chunk
+     - Resume support (checks existing chunks)
+     - Auto-retry up to 5 times with exponential backoff
+  4. Metadata saved: title, description, tags, visibility, series
+  5. Thumbnail selection (auto-generated or custom upload)
+
+PROCESSING PIPELINE (src/lib/video-processing.ts):
+  1. FFprobe detects duration/resolution
+  2. FFmpeg encodes two variants:
+     - Main: 720p, H.264, CRF 23, fast preset
+     - Low: 360p, CRF 28 for low bandwidth
+  3. Both use -movflags +faststart for instant playback
+  4. Fixed 2-second GOPs (48 keyframes at 24fps)
+  5. AAC audio at 128k
+
+VIDEO STATUSES:
+  PROCESSING -> READY (success) or FAILED (error)
+  DELETED (soft delete, never hard-deleted)
+
+VIDEO VISIBILITY:
+  PUBLIC         - Anyone can see
+  UNLISTED       - Only accessible via direct link
+  PRIVATE        - Only creator can see
+  FOLLOWERS_ONLY - Only creator's followers can see
+
+ALTERNATIVE UPLOAD ROUTES:
+  /api/upload/session         - Initialize upload session
+  /api/upload/chunk-json      - Base64-encoded chunk (no FormData)
+  /api/upload/stream-gallery  - Camera-off/mute overlay images
+
+VIDEO MANAGEMENT:
+  GET /api/videos/[id]    - View video details
+  PUT /api/videos/[id]    - Update metadata
+  DELETE /api/videos/[id] - Soft delete
+
+
+================================================================================
+22. SOCIAL & FRIENDS SYSTEM
+================================================================================
+
+FOLLOWS:
+  Model: Follow (followerId, followingId)
+  - Users can follow/unfollow creators
+  - Follower counts tracked on User model
+  - Affects content visibility (FOLLOWERS_ONLY videos)
+
+BLOCKS:
+  Model: Block (blockerId, blockedId)
+  - Blocked users cannot: send messages, donate, view streams
+  - Bidirectional check on interactions
+
+FRIENDS:
+  Models: FriendRequest, Friendship, FriendTimeout
+
+  Request Flow:
+    1. User A sends friend request (FriendRequest PENDING)
+    2. User B accepts (FriendRequest ACCEPTED, Friendship created)
+    3. Or: User B declines (FriendRequest DECLINED)
+    4. User A can cancel (FriendRequest CANCELLED)
+
+  Friendship Features:
+    - Online status with last seen time
+    - 90-second heartbeat for presence tracking
+    - Timeout mechanism (mute notifications for duration)
+    - Remove friend (deletes Friendship)
+    - Block friend (creates Block, removes Friendship)
+
+  Store: src/stores/friends-store.ts
+    - Friend list with search
+    - Incoming/outgoing request counts
+    - Heartbeat interval management
+    - Unread request tracking
+
+
+================================================================================
+23. MESSAGING SYSTEM
+================================================================================
+
+Model: Message (Snapchat-style)
+
+Message Types:
+  - Text messages
+  - Image messages
+  - Video messages
+  - Audio messages
+  - Snap messages (ephemeral, view-once)
+
+Auto-Delete Modes:
+  IMMEDIATELY      - Delete after recipient opens
+  AFTER_24H        - Delete 24 hours after opening
+  WHEN_BOTH_LEAVE  - Delete when both users leave chat
+  NEVER            - Persist permanently
+
+Message Statuses:
+  SENT -> DELIVERED -> OPENED -> DELETED
+
+Features:
+  - Read receipts (single/double/animated checkmarks)
+  - Typing indicators
+  - Screenshot detection
+  - Emoji reactions
+  - Delete/forward messages
+  - Online status and last seen
+
+Message Streaks (MessageStreak model):
+  - Tracked between each friend pair
+  - Consecutive days of messaging
+  - Milestone rewards at days 5/10/15/20/25/30
+  - Day 30 bonus: 500 credits ($5.00) to both users
+
+Credit Integration:
+  - Premium messages may cost credits (creditCost field)
+  - Streak bonuses add credits to both wallets
+
+
+================================================================================
+24. NOTIFICATION SYSTEM
+================================================================================
+
+Model: Notification
+
+Types:
+  FOLLOW           - Someone followed you
+  LIKE             - Someone liked your video
+  COMMENT          - Someone commented on your video
+  DONATION         - Someone donated to your stream
+  MESSAGE          - New direct message
+  LIVE_START       - Someone you follow went live
+  SUBSCRIPTION     - New subscriber
+  SERVICE_ORDER    - New service order received
+  SYSTEM           - Platform announcement
+  STREAK_BONUS     - Message streak reward earned
+  FRIEND_REQUEST   - Someone sent you a friend request
+  FRIEND_ACCEPT    - Someone accepted your friend request
+  PRIVATE_MESSAGE  - New private/snap message
+
+API:
+  GET /api/notifications    - Paginated list (default 20)
+  PUT /api/notifications    - Mark as read (bulk or specific IDs)
+
+Polling: Frontend polls every 15 seconds for unread count
+
+Smart Routing: Each notification type links to the relevant page:
+  Comment/Like    -> /watch/[videoId]
+  Follow          -> /profile/[username]
+  Message         -> /messages
+  Live start      -> /live/[roomId]
+  Battle invite   -> /battle/[roomId]
+  Donation/Gift   -> /wallet
+  Friend request  -> Profile or messages
+
+
+================================================================================
+25. CREATOR TOOLS
+================================================================================
+
+CREATOR STUDIO (/creator-studio):
+  Content management: Video list, visibility, editing, deletion
+  Series management: Create/edit/delete series, episode reordering
+  Live settings: Stream defaults, moderation config
+  Moderation: Banned words, slow mode, comment filters
+  Ad settings: Custom ad campaigns, CPM management
+  Integrations: Streamlabs, YouTube, Discord, PayPal
+
+STREAM KEY MANAGEMENT:
+  Endpoint: /api/creator/stream-key
+  Format: rly_live_ + 32-character hex
+  RTMP URL: rtmp://rallylive.ca/live
+  Auto-generates on first GET, regenerates on POST
+
+THIRD-PARTY INTEGRATIONS:
+  Streamlabs: Token stored encrypted, returned masked
+  OBS WebSocket: Host, port, password (encrypted)
+  Restream: Multi-platform streaming (progressive rollout)
+
+STREAM WHITELIST:
+  Model: StreamWhitelist
+  Allows creators to restrict stream access to approved users
+
+ANALYTICS (/analytics):
+  - Impression views, total videos, followers, revenue
+  - Monthly view charts
+  - Like/dislike engagement ratios
+  - Live performance: streams, peak viewers, chat count
+  - Top performing streams table
+
+
+================================================================================
+26. ADMIN PANEL
+================================================================================
+
+Endpoint: /admin (restricted to isOwner=true)
+
+DASHBOARD STATS:
+  - Total users, videos, credits in circulation
+  - Revenue, banned users, verified users
+  - Active streams, pending/settled fees
+
+USER MANAGEMENT:
+  - Search users by name/email
+  - Verify/unverify users
+  - Ban/unban users
+  - Edit user roles
+
+TREASURY MANAGEMENT:
+  - Credit balance overview
+  - Fee tracking (pending vs settled)
+  - Withdrawal processing
+  - Platform revenue breakdown
+
+CONTENT MODERATION:
+  - Video flagging and removal
+  - Comment removal
+  - User suspension
+  - Report review
+
+FEE CONFIGURATION:
+  - Withdrawal fee percentage and minimum
+  - Purchase fee percentage
+  - Ad pricing and mix percentage
+  - Custom ad cost per impression
+
+BRIDGE SYSTEM (Desktop App Communication):
+  - Launch Claude CLI sessions
+  - Send commands to local bridge service
+  - Monitor process output
+  - Get window thumbnails
+  - Bridge connection management
+  - Restricted to owner + device-gated
+
+BUG REPORTS:
+  Model: BugReport
+  Statuses: OPEN -> INVESTIGATING -> DIAGNOSED -> FIXING ->
+            FIXED -> TESTING -> RESOLVED (or FAILED/DISMISSED)
+  Fields include diagnosis, fixPlan, fixResult, testResult
+
+
+================================================================================
+27. FIVEM INTEGRATION
+================================================================================
+
+Rally Live includes a full GTA RP server management platform.
+
+CORE FEATURES:
+  - Server profiles with logo, cover, description
+  - Member management (ADMIN, MODERATOR, USER roles)
+  - Job listings (whitelist-only available)
+  - Custom website pages (JSON content)
+  - VIP subscription packages
+  - Bug reports with AI-powered analysis
+  - Feature suggestions with AI implementation planning
+  - Discord integration (member count sync)
+  - Resource sync via git/zip
+
+MODELS:
+  FivemServer            - Server profile and settings
+  FivemServerMember      - Membership with roles/status
+  FivemServerJob         - Available positions
+  FivemServerPage        - Custom website content
+  FivemServerVipPackage  - Subscription tiers
+  FivemServerVipPurchase - Active purchases
+  FivemWebsiteSubscription - Monthly billing
+  FivemBugReport         - In-game bug reports
+  FivemSuggestion        - Feature suggestions
+  FivemAdminComment      - Staff comments
+  FivemWhitelistApplication - Department applications
+
+WHITELIST DEPARTMENTS:
+  POLICE, EMS, FIREFIGHTER, JUDGE, LAWYER
+
+CREDIT INTEGRATION:
+  - 200 credits to create a server website
+  - Monthly subscription via credits/PayPal
+  - VIP packages purchased with credits
+  - Job/rule application fees (configurable)
+
+API: 40+ endpoints for full server management
+
+
+================================================================================
+28. OFFLINE & PWA SUPPORT
+================================================================================
+
+Rally Live is a Progressive Web App with offline-first architecture.
+
+SERVICE WORKER (public/sw.js):
+  - Caches static assets for offline access
+  - Automatic cache clearing on version change
+  - Registered in root layout
+
+OFFLINE QUEUE SYSTEM (src/lib/offline/):
+  queue.ts:
+    - IndexedDB-based action queue
+    - Dependencies between queued actions
+    - Exponential backoff retry (up to 7 attempts)
+    - Idempotency keys + nonces for safe replay
+    - Signature-based payload validation
+
+  upload-queue.ts:
+    - Tracks upload jobs with completed chunks
+    - Stores raw blob data locally
+    - Resumes uploads when back online
+
+  db.ts:
+    - IndexedDB for local persistence
+    - Cached feed snapshots
+    - Queue actions and sync state
+
+  connectivity.ts:
+    - Monitors online/offline state
+    - Network change event listeners
+
+API LAYER (src/lib/api.ts):
+  - GET requests to key endpoints cached as snapshots
+  - Mutations queued when offline (POST/PUT/DELETE)
+  - Graceful fallback to cached data on network errors
+  - Admin endpoints excluded from offline support
+
+SYNC FLOW:
+  POST /api/sync/actions   - Batch process queued offline actions
+  GET /api/offline/version - Check client/server compatibility
+
+WHAT WORKS OFFLINE:
+  - Queue video uploads
+  - Edit video metadata
+  - Schedule publishes
+  - Write messages (queued for send)
+  - Browse cached content
+
+REQUIRES INTERNET:
+  - Live streams and real-time chat
+  - New uncached video content
+  - Admin tools
+  - Payment processing
+
+PWA INSTALLATION (/install):
+  - Chrome/Edge: Native install prompt
+  - iOS: Manual instructions (Share -> Add to Home Screen)
+  - Android: Menu-based installation
+  - Standalone mode detection
+
+
+================================================================================
+29. SECURITY & ANTI-FRAUD
+================================================================================
+
+RATE LIMITING (src/lib/rate-limit.ts):
+  - In-memory sliding window counter
+  - Per-key tracking (IP, email, user)
+  - 5-minute cleanup interval
+  - Examples:
+    - PayPal create-order: 10/user/10min
+    - PayPal capture: 5/user/10min
+    - Auth login: 25/IP/10min, 10/email/10min
+    - Auth register: 10/IP/hour, 5/email/hour
+    - Ad serve: 30/IP/minute
+
+FINANCIAL SECURITY:
+  - Ledger idempotency: @@unique([type, referenceId])
+  - Race-safe debits: Conditional SQL prevents overdraft
+  - Atomic transactions: prisma.$transaction() for all mutations
+  - PayPal order verification before credit mint
+
+AUTHENTICATION SECURITY:
+  - JWT in httpOnly, secure, sameSite=lax cookies
+  - Password hashing: bcryptjs with 12-round salt
+  - Device gating for owner accounts
+  - Session expiry (30 days)
+  - Age gate enforcement (13+)
+
+CONTENT SECURITY:
+  - Block system prevents interaction with blocked users
+  - Stream host can block chat senders
+  - Moderation tools: banned words, slow mode
+  - Report system for users/videos/comments
+
+SECURITY POLICY (src/lib/security-policy.ts):
+  - Account restriction checks (isBanned, isDeactivated)
+  - Owner device gate enforcement
+  - IP extraction from forwarded headers
+
+INPUT VALIDATION:
+  - Amount ranges on all financial endpoints
+  - User existence verified before transfers
+  - File type/size validation on uploads
+  - Enum enforcement on all status fields
+
+AUDIT LOGGING:
+  - PayPal captures logged with full details
+  - Failed login attempts tracked
+  - User registration metadata stored
+  - Admin actions recorded
+
+ENCRYPTED STORAGE:
+  - Streamlabs tokens encrypted in database
+  - OBS WebSocket passwords encrypted
+  - Stream keys stored securely
+  - Returned masked to frontend
+
+
+================================================================================
+30. FEATURE DEPENDENCIES MAP
+================================================================================
+
+This shows which features depend on which systems:
+
+WALLET (required by nearly everything):
+  <- Donations (live streams)
+  <- Game gifts (battles)
+  <- Power-up purchases
+  <- Credit transfers
+  <- Service marketplace
+  <- Ad purchases
+  <- FiveM subscriptions
+  <- VIP package purchases
+  <- Withdrawals
+
+LIVE STREAMING (depends on):
+  -> Wallet (donations, gifts)
+  -> Game Engine (battle modes)
+  -> Chat System (messages, moderation)
+  -> Recording System (stream archives)
+  -> WebRTC (peer connections)
+  -> HLS (stream delivery)
+
+BATTLE SYSTEM (depends on):
+  -> Live Streaming (host stream)
+  -> Game Engine (state management)
+  -> Wallet (gifts, power-ups)
+  -> SSE (real-time state)
+  -> Donation Tiers (unit stats)
+
+VIDEO PLATFORM (depends on):
+  -> Upload System (chunked upload)
+  -> FFmpeg (encoding pipeline)
+  -> Ad System (pre-roll ads)
+  -> Comment System (engagement)
+  -> Like System (engagement)
+
+MESSAGING (depends on):
+  -> Friends System (DM access)
+  -> Wallet (streak bonuses)
+  -> Notification System (alerts)
+
+CREATOR TOOLS (depends on):
+  -> Video Platform (content management)
+  -> Live Streaming (stream settings)
+  -> Wallet (earnings, analytics)
+  -> Ad System (custom campaigns)
+
+FIVEM (depends on):
+  -> Wallet (subscriptions, VIP purchases)
+  -> Auth System (user accounts)
+  -> PayPal (website billing)
+
+ADMIN (depends on):
+  -> All systems (full platform control)
+  -> Bridge System (desktop communication)
+  -> Treasury (financial oversight)
+
+
+================================================================================
+                          END OF DOCUMENTATION
+================================================================================
+
+This document covers the complete Rally Live platform architecture as of
+March 2026. The platform is a Next.js application with MySQL database,
+PayPal payment integration, real-time game engines, and a comprehensive
+credit-based economy that powers all monetization features.
+
+Key file locations for developers:
+  Database schema:     prisma/schema.prisma
+  Credit ledger:       src/lib/credit-ledger.ts
+  PayPal integration:  src/lib/paypal.ts
+  Donation tiers:      src/lib/donation-tiers.ts
+  Treasury:            src/lib/treasury.ts
+  Game engine:         src/lib/games/game-engine.ts
+  Auth library:        src/lib/auth.ts
+  API helper:          src/lib/api.ts
+  Rate limiting:       src/lib/rate-limit.ts
+  Video processing:    src/lib/video-processing.ts
+  Wallet store:        src/stores/wallet-store.ts
+  All API routes:      src/app/api/
+  All pages:           src/app/(main)/

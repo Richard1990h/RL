@@ -12,7 +12,6 @@ import {
   Star,
   Bell,
   Check,
-  Settings,
   Flame,
   Loader2,
 } from "lucide-react";
@@ -30,6 +29,7 @@ interface ApiNotification {
   read: boolean;
   createdAt: string;
   relatedId?: string | null;
+  relatedUsername?: string | null;
   userId?: string;
 }
 
@@ -41,6 +41,7 @@ interface Notification {
   read: boolean;
   timestamp: string;
   relatedId?: string;
+  relatedUsername?: string;
   userId?: string;
 }
 
@@ -53,6 +54,7 @@ function normalizeNotification(raw: ApiNotification): Notification {
     read: raw.read,
     timestamp: raw.createdAt,
     relatedId: raw.relatedId ?? undefined,
+    relatedUsername: raw.relatedUsername ?? undefined,
     userId: raw.userId,
   };
 }
@@ -185,22 +187,27 @@ export default function NotificationsPage() {
                 }
                 const t = notification.type;
                 const rid = notification.relatedId;
+                const rusername = notification.relatedUsername;
 
                 // Video-related: comment, like → go to the video
                 if ((t === "comment" || t === "like") && rid) {
-                  router.push(`/watch/${rid}`); // Middleware will display /@username format via rewrite
+                  router.push(`/watch/${rid}`);
                 }
-                // Follow → go to that user's profile
-                else if (t === "follow" && rid) {
-                  router.push(`/profile/${rid}`);
+                // Follow → go to that user's profile (use username, not ID)
+                else if (t === "follow" && rusername) {
+                  router.push(`/profile/${rusername}`);
                 }
                 // Messages & private messages → open messages
                 else if (t === "message" || t === "private_message") {
                   router.push("/messages");
                 }
-                // Friend request / accept → open messages
+                // Friend request / accept → use username if available, fallback to messages
                 else if (t === "friend_request" || t === "friend_accept") {
-                  router.push("/messages");
+                  if (rusername) {
+                    router.push(`/profile/${rusername}`);
+                  } else {
+                    router.push("/messages");
+                  }
                 }
                 // Donations / gifts → wallet
                 else if (t === "donation" || t === "gift") {

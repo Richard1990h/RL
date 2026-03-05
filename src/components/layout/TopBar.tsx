@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Menu, Search, Bell, X, CircleDollarSign, User, LogOut, Settings } from "lucide-react";
+import { Menu, Bell, CircleDollarSign, User, LogOut, Settings } from "lucide-react";
 import { useUIStore } from "@/stores/ui-store";
 import { MobileDrawer } from "@/components/layout/MobileDrawer";
 import { useAuthStore } from "@/stores/auth-store";
@@ -15,7 +15,7 @@ export function TopBar() {
   const { toggleMobileDrawer } = useUIStore();
   const { currentUser, logout } = useAuthStore();
   const { credits } = useWalletStore();
-  const { unreadCount, prevUnreadCount, hasPrivateMessage, clearPrivateHighlight } = useNotificationStore();
+  const { unreadCount, hasPrivateMessage, clearPrivateHighlight } = useNotificationStore();
 
   // Play notification sound when unreadCount increases
   const prevCountRef = useRef(unreadCount);
@@ -32,42 +32,32 @@ export function TopBar() {
 
   const formattedCredits = credits.toLocaleString("en-US");
 
-  const [query, setQuery] = useState("");
-  const [searchExpanded, setSearchExpanded] = useState(false);
   const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
   const avatarMenuRef = useRef<HTMLDivElement>(null);
 
   // Close avatar menu on outside click
   useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
+    function handleClickOutside(e: Event) {
       if (avatarMenuRef.current && !avatarMenuRef.current.contains(e.target as Node)) {
         setAvatarMenuOpen(false);
       }
     }
     if (avatarMenuOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-      return () => document.removeEventListener("mousedown", handleClickOutside);
+      document.addEventListener("pointerdown", handleClickOutside);
+      document.addEventListener("touchstart", handleClickOutside, { passive: true });
+      return () => {
+        document.removeEventListener("pointerdown", handleClickOutside);
+        document.removeEventListener("touchstart", handleClickOutside);
+      };
     }
   }, [avatarMenuOpen]);
 
-  const handleSearch = useCallback(
-    (e: React.FormEvent) => {
-      e.preventDefault();
-      const trimmed = query.trim();
-      if (trimmed) {
-        router.push(`/search?q=${encodeURIComponent(trimmed)}`);
-        setSearchExpanded(false);
-      }
-    },
-    [query, router]
-  );
-
   return (
-    <header className="sticky top-0 z-40 flex h-14 items-center gap-3 border-b border-border bg-bg-surface px-4 md:h-16">
+    <header className="sticky top-0 z-[70] mx-2 mt-2 flex h-14 items-center gap-2 rounded-2xl border border-border/80 bg-bg-surface/85 px-2.5 shadow-[0_16px_40px_rgba(2,8,23,0.38)] backdrop-blur-xl lg:mx-6 lg:mt-3 lg:h-16 lg:gap-3 lg:px-4">
       {/* Mobile hamburger */}
       <button
         onClick={toggleMobileDrawer}
-        className="rounded-lg p-2 text-text-muted transition-colors hover:bg-bg-surface2 hover:text-text md:hidden"
+        className="rounded-lg p-2 text-text-muted transition-colors hover:bg-bg-surface2 hover:text-text lg:hidden"
         aria-label="Toggle menu"
       >
         <Menu size={22} />
@@ -77,73 +67,19 @@ export function TopBar() {
       <MobileDrawer />
 
       {/* Logo - visible on desktop */}
-      <Link href="/home" className="hidden items-center gap-2 md:flex">
+      <Link href="/home" className="hidden items-center gap-2 lg:flex">
         <img src="/logo.png?v=3" alt="Rally Live" className="h-8 w-8 object-contain" />
+        <span className="text-sm font-semibold tracking-wide text-text-secondary">Rally Live</span>
       </Link>
 
-      {/* Search bar - centered */}
-      <div className="flex flex-1 items-center justify-center">
-        {/* Desktop search - always visible, centered */}
-        <form onSubmit={handleSearch} className="hidden w-full max-w-lg md:flex">
-          <div className="relative w-full">
-            <Search
-              size={18}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
-            />
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search Rally Live..."
-              className="w-full rounded-full border border-border bg-bg-surface2 py-2 pl-10 pr-4 text-sm text-text placeholder:text-text-muted transition-colors focus:border-primary focus:outline-none"
-            />
-          </div>
-        </form>
-
-        {/* Mobile search - expandable */}
-        {searchExpanded ? (
-          <form onSubmit={handleSearch} className="flex w-full items-center gap-2 md:hidden">
-            <div className="relative flex-1">
-              <Search
-                size={16}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
-              />
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search..."
-                autoFocus
-                className="w-full rounded-full border border-border bg-bg-surface2 py-2 pl-9 pr-3 text-sm text-text placeholder:text-text-muted focus:border-primary focus:outline-none"
-              />
-            </div>
-            <button
-              type="button"
-              onClick={() => setSearchExpanded(false)}
-              className="rounded-lg p-2 text-text-muted hover:text-text"
-              aria-label="Close search"
-            >
-              <X size={20} />
-            </button>
-          </form>
-        ) : (
-          <button
-            onClick={() => setSearchExpanded(true)}
-            className="rounded-lg p-2 text-text-muted transition-colors hover:bg-bg-surface2 hover:text-text md:hidden"
-            aria-label="Open search"
-          >
-            <Search size={22} />
-          </button>
-        )}
-      </div>
+      <div className="flex-1" />
 
       {/* Right section */}
-      {!searchExpanded && (
-        <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2">
           {/* Credit balance pill */}
           <button
             onClick={() => router.push("/wallet")}
-            className="flex items-center gap-1.5 rounded-full bg-bg-surface2 px-3 py-1.5 text-sm transition-colors hover:bg-bg-surface2/80"
+            className="hidden items-center gap-1.5 rounded-full border border-border/70 bg-bg-surface2/80 px-3 py-1.5 text-sm transition-colors hover:bg-bg-surface3/70 sm:flex"
             aria-label="View wallet"
           >
             <CircleDollarSign size={16} className="text-accent" />
@@ -158,7 +94,7 @@ export function TopBar() {
               }
               router.push("/notifications");
             }}
-            className={`relative rounded-lg p-2 text-text-muted transition-colors hover:bg-bg-surface2 ${
+            className={`relative rounded-xl border border-transparent p-2 text-text-muted transition-colors hover:border-border hover:bg-bg-surface2 ${
               unreadCount > 0 && !hasPrivateMessage
                 ? "animate-pulse ring-2 ring-red-500/50 shadow-[0_0_10px_rgba(239,68,68,0.3)]"
                 : ""
@@ -193,17 +129,17 @@ export function TopBar() {
             <div className="relative" ref={avatarMenuRef}>
               <button
                 onClick={() => setAvatarMenuOpen((v) => !v)}
-                className="overflow-hidden rounded-full ring-2 ring-transparent transition-all hover:ring-primary"
+                className="overflow-hidden rounded-full ring-2 ring-border/60 transition-all hover:ring-primary"
               >
                 <img
                   src={currentUser.avatarUrl ?? undefined}
                   alt={currentUser.displayName}
-                  className="h-8 w-8 rounded-full object-cover"
-                />
+                className="h-7 w-7 rounded-full object-cover lg:h-8 lg:w-8"
+              />
               </button>
               {avatarMenuOpen && (
-                <div className="absolute right-0 top-full mt-2 w-48 rounded-lg border border-border bg-bg-surface shadow-xl z-50 overflow-hidden">
-                  <div className="px-3 py-2 border-b border-border">
+                <div className="absolute right-0 top-full z-[90] mt-2 w-52 overflow-hidden rounded-xl border border-border bg-bg-surface shadow-xl">
+                  <div className="border-b border-border px-3 py-2">
                     <p className="text-sm font-medium text-text truncate">{currentUser.displayName}</p>
                     <p className="text-xs text-text-muted truncate">@{currentUser.username}</p>
                   </div>
@@ -239,8 +175,7 @@ export function TopBar() {
               Sign In
             </button>
           )}
-        </div>
-      )}
+      </div>
     </header>
   );
 }

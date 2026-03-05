@@ -29,8 +29,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `Maximum amount is $${(MAX_AMOUNT_CENTS / 100).toFixed(2)}` }, { status: 400 });
     }
 
-    if (!type || !["deposit", "credits"].includes(type)) {
-      return NextResponse.json({ error: "Type must be 'deposit' or 'credits'" }, { status: 400 });
+    if (!type || !["deposit", "credits", "fivem_website"].includes(type)) {
+      return NextResponse.json({ error: "Type must be 'deposit', 'credits', or 'fivem_website'" }, { status: 400 });
     }
 
     // Validate packageCredits against known preset packages
@@ -53,19 +53,19 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Make sure wallet exists
-    const wallet = await prisma.wallet.findUnique({
+    // Ensure wallet exists for consistency across modules.
+    await prisma.wallet.upsert({
       where: { userId: currentUser.id },
+      update: {},
+      create: { userId: currentUser.id },
     });
-
-    if (!wallet) {
-      return NextResponse.json({ error: "Wallet not found" }, { status: 404 });
-    }
 
     const amountUSD = (amountCents / 100).toFixed(2);
     const description = type === "deposit"
       ? `Rally Live - Add $${amountUSD} to wallet`
-      : `Rally Live - Purchase credits ($${amountUSD})`;
+      : type === "fivem_website"
+        ? `Rally Live - FiveM website monthly plan ($${amountUSD})`
+        : `Rally Live - Purchase credits ($${amountUSD})`;
 
     const order = await createOrder(amountUSD, description);
 
@@ -73,13 +73,13 @@ export async function POST(req: NextRequest) {
       orderID: order.id,
       status: order.status,
     });
-  } catch (error: any) {
-    if (error?.status === 401) {
+  } catch (error: unknown) {
+    if (typeof error === "object" && error !== null && "status" in error && (error as { status?: number }).status === 401) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
     console.error("PayPal create order error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to create PayPal order" },
+      { error: error instanceof Error ? error.message : "Failed to create PayPal order" },
       { status: 500 }
     );
   }

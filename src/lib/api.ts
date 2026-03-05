@@ -1,10 +1,17 @@
 // Rally Live API Client
 // Used by frontend components to call backend API routes
 
+import { offlineDb } from "@/lib/offline/db";
+import { enqueueHttpAction, processOfflineQueue } from "@/lib/offline/queue";
+
 type RequestOptions = {
   method?: string;
   body?: unknown;
   headers?: Record<string, string>;
+  queueOnOffline?: boolean;
+  optimisticResponse?: unknown;
+  snapshotKey?: string;
+  allowOfflineSnapshot?: boolean;
 };
 
 export interface CustomAdResponse {
@@ -24,11 +31,66 @@ export interface CustomAdResponse {
   user?: { username: string; displayName: string };
 }
 
+function isLikelyOfflineError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return message.includes("failed to fetch") || message.includes("networkerror");
+}
+
+function shouldSnapshot(endpoint: string): boolean {
+  return endpoint.startsWith("/api/videos")
+    || endpoint.startsWith("/api/live")
+    || endpoint.startsWith("/api/series")
+    || endpoint.startsWith("/api/auth/me")
+    || endpoint.startsWith("/api/messages");
+}
+
+function isSensitiveEndpoint(endpoint: string): boolean {
+  return endpoint.startsWith("/api/admin");
+}
+
+function getSnapshotKey(method: string, endpoint: string, explicit?: string): string {
+  return explicit ?? `${method.toUpperCase()}:${endpoint}`;
+}
+
+async function readSnapshot<T>(key: string): Promise<T | undefined> {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const snapshot = await offlineDb.getFeedSnapshot(key);
+    return snapshot?.data as T | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeSnapshot<T>(key: string, data: T): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    await offlineDb.putFeedSnapshot({ key, data, updatedAt: Date.now() });
+  } catch {
+    // Best effort cache only.
+  }
+}
+
+function isOfflineNow(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return !navigator.onLine;
+}
+
 async function request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-  const { method = "GET", body, headers = {} } = options;
+  const {
+    method = "GET",
+    body,
+    headers = {},
+    queueOnOffline = false,
+    optimisticResponse,
+    snapshotKey,
+    allowOfflineSnapshot = true,
+  } = options;
+  const normalizedMethod = method.toUpperCase();
+  const resolvedSnapshotKey = getSnapshotKey(normalizedMethod, endpoint, snapshotKey);
 
   const config: RequestInit = {
-    method,
+    method: normalizedMethod,
     headers: {
       "Content-Type": "application/json",
       ...headers,
@@ -36,18 +98,65 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     credentials: "include",
   };
 
-  if (body && method !== "GET") {
+  if (body && normalizedMethod !== "GET") {
     config.body = JSON.stringify(body);
   }
 
-  const res = await fetch(endpoint, config);
+  const sensitiveEndpoint = isSensitiveEndpoint(endpoint);
+  const canUseOfflineSnapshot = allowOfflineSnapshot && !sensitiveEndpoint;
+  const canQueueOffline = queueOnOffline && !sensitiveEndpoint;
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: "Request failed" }));
-    throw new Error(error.error || `HTTP ${res.status}`);
+  if (normalizedMethod === "GET" && isOfflineNow() && canUseOfflineSnapshot) {
+    const snapshot = await readSnapshot<T>(resolvedSnapshotKey);
+    if (snapshot !== undefined) return snapshot;
   }
 
-  return res.json();
+  if (normalizedMethod !== "GET" && canQueueOffline && isOfflineNow()) {
+    const queued = await enqueueHttpAction({
+      endpoint,
+      method: normalizedMethod,
+      headers,
+      body,
+    });
+    return ((optimisticResponse ?? { queued: true, queueId: queued.id }) as T);
+  }
+
+  try {
+    const res = await fetch(endpoint, config);
+
+    if (!res.ok) {
+      if (normalizedMethod === "GET" && canUseOfflineSnapshot && res.status >= 500) {
+        const snapshot = await readSnapshot<T>(resolvedSnapshotKey);
+        if (snapshot !== undefined) return snapshot;
+      }
+      const error = await res.json().catch(() => ({ error: "Request failed" }));
+      throw new Error(error.error || `HTTP ${res.status}`);
+    }
+
+    const data = await res.json() as T;
+    if (normalizedMethod === "GET" && !sensitiveEndpoint && shouldSnapshot(endpoint)) {
+      await writeSnapshot(resolvedSnapshotKey, data);
+    }
+    if (normalizedMethod !== "GET" && typeof window !== "undefined" && navigator.onLine) {
+      void processOfflineQueue();
+    }
+    return data;
+  } catch (error) {
+    if (normalizedMethod !== "GET" && canQueueOffline && isLikelyOfflineError(error)) {
+      const queued = await enqueueHttpAction({
+        endpoint,
+        method: normalizedMethod,
+        headers,
+        body,
+      });
+      return ((optimisticResponse ?? { queued: true, queueId: queued.id }) as T);
+    }
+    if (normalizedMethod === "GET" && canUseOfflineSnapshot) {
+      const snapshot = await readSnapshot<T>(resolvedSnapshotKey);
+      if (snapshot !== undefined) return snapshot;
+    }
+    throw error;
+  }
 }
 
 // ── Auth ──
@@ -97,17 +206,17 @@ export const api = {
     get: (id: string) =>
       request(`/api/users/${id}`),
     update: (id: string, data: Record<string, unknown>) =>
-      request(`/api/users/${id}`, { method: "PUT", body: data }),
+      request(`/api/users/${id}`, { method: "PUT", body: data, queueOnOffline: true }),
     delete: (id: string) =>
       request(`/api/users/${id}`, { method: "DELETE" }),
     follow: (id: string) =>
-      request(`/api/users/${id}/follow`, { method: "POST" }),
+      request(`/api/users/${id}/follow`, { method: "POST", queueOnOffline: true, optimisticResponse: { queued: true } }),
     unfollow: (id: string) =>
-      request(`/api/users/${id}/follow`, { method: "DELETE" }),
+      request(`/api/users/${id}/follow`, { method: "DELETE", queueOnOffline: true, optimisticResponse: { queued: true } }),
     block: (id: string) =>
-      request(`/api/users/${id}/block`, { method: "POST" }),
+      request(`/api/users/${id}/block`, { method: "POST", queueOnOffline: true }),
     unblock: (id: string) =>
-      request(`/api/users/${id}/block`, { method: "DELETE" }),
+      request(`/api/users/${id}/block`, { method: "DELETE", queueOnOffline: true }),
   },
 
   // ── Videos ──
@@ -119,21 +228,54 @@ export const api = {
     get: (id: string) =>
       request(`/api/videos/${id}`),
     create: (data: Record<string, unknown>) =>
-      request("/api/videos", { method: "POST", body: data }),
+      request("/api/videos", { method: "POST", body: data, queueOnOffline: true, optimisticResponse: { queued: true } }),
     update: (id: string, data: Record<string, unknown>) =>
-      request(`/api/videos/${id}`, { method: "PUT", body: data }),
+      request(`/api/videos/${id}`, { method: "PUT", body: data, queueOnOffline: true, optimisticResponse: { queued: true } }),
     delete: (id: string) =>
       request(`/api/videos/${id}`, { method: "DELETE" }),
     like: (id: string, isLike: boolean) =>
-      request(`/api/videos/${id}/like`, { method: "POST", body: { isLike } }),
+      request(`/api/videos/${id}/like`, {
+        method: "POST",
+        body: { isLike },
+        queueOnOffline: true,
+        optimisticResponse: {
+          action: isLike ? "liked" : "disliked",
+          likes: 0,
+          dislikes: 0,
+          queued: true,
+        },
+      }),
     comments: (id: string, params?: Record<string, string>) => {
       const query = params ? "?" + new URLSearchParams(params).toString() : "";
       return request(`/api/videos/${id}/comments${query}`);
     },
     addComment: (id: string, text: string) =>
-      request(`/api/videos/${id}/comments`, { method: "POST", body: { text } }),
+      request(`/api/videos/${id}/comments`, {
+        method: "POST",
+        body: { text },
+        queueOnOffline: true,
+        optimisticResponse: {
+          queued: true,
+          comment: {
+            id: `temp_${Date.now()}`,
+            userId: "me",
+            videoId: id,
+            text,
+            likes: 0,
+            createdAt: new Date().toISOString(),
+            userLiked: false,
+            user: {
+              id: "me",
+              username: "you",
+              displayName: "You",
+              avatarUrl: null,
+              verifiedBadge: false,
+            },
+          },
+        },
+      }),
     likeComment: (videoId: string, commentId: string) =>
-      request(`/api/videos/${videoId}/comments/${commentId}/like`, { method: "POST" }),
+      request(`/api/videos/${videoId}/comments/${commentId}/like`, { method: "POST", queueOnOffline: true, optimisticResponse: { queued: true } }),
     donate: (id: string, credits: number) =>
       request(`/api/videos/${id}/donate`, { method: "POST", body: { credits } }),
   },
@@ -147,9 +289,9 @@ export const api = {
     get: (id: string) =>
       request(`/api/series/${id}`),
     create: (data: Record<string, unknown>) =>
-      request("/api/series", { method: "POST", body: data }),
+      request("/api/series", { method: "POST", body: data, queueOnOffline: true, optimisticResponse: { queued: true } }),
     update: (id: string, data: Record<string, unknown>) =>
-      request(`/api/series/${id}`, { method: "PUT", body: data }),
+      request(`/api/series/${id}`, { method: "PUT", body: data, queueOnOffline: true, optimisticResponse: { queued: true } }),
     delete: (id: string) =>
       request(`/api/series/${id}`, { method: "DELETE" }),
   },
@@ -177,7 +319,20 @@ export const api = {
     conversations: () =>
       request("/api/messages"),
     send: (data: { receiverId: string; text?: string; mediaUrl?: string; mediaType?: string; isPrivate: boolean; deleteAfter: string; viewTimerSec?: number }) =>
-      request("/api/messages", { method: "POST", body: data }),
+      request("/api/messages", {
+        method: "POST",
+        body: data,
+        queueOnOffline: true,
+        optimisticResponse: {
+          queued: true,
+          message: {
+            id: `temp_${Date.now()}`,
+            text: data.text ?? "",
+            createdAt: new Date().toISOString(),
+            pending: true,
+          },
+        },
+      }),
     getConversation: (userId: string) =>
       request(`/api/messages/${userId}`),
     deleteConversation: (userId: string) =>
@@ -197,9 +352,9 @@ export const api = {
     get: (id: string) =>
       request(`/api/live/${id}`),
     create: (data: Record<string, unknown>) =>
-      request("/api/live", { method: "POST", body: data }),
+      request("/api/live", { method: "POST", body: data, queueOnOffline: true, optimisticResponse: { queued: true } }),
     update: (id: string, data: Record<string, unknown>) =>
-      request(`/api/live/${id}`, { method: "PUT", body: data }),
+      request(`/api/live/${id}`, { method: "PUT", body: data, queueOnOffline: true, optimisticResponse: { queued: true } }),
     end: (id: string) =>
       request(`/api/live/${id}`, { method: "DELETE" }),
     join: (id: string, role: "viewer" | "guest") =>
@@ -211,7 +366,7 @@ export const api = {
       return request(`/api/live/${id}/chat${query}`);
     },
     sendChat: (id: string, data: { text: string; isDonation?: boolean; creditAmount?: number }) =>
-      request(`/api/live/${id}/chat`, { method: "POST", body: data }),
+      request(`/api/live/${id}/chat`, { method: "POST", body: data, queueOnOffline: true, optimisticResponse: { queued: true } }),
     moderate: (id: string, data: { action: string; targetUserId: string; timeoutMinutes?: number }) =>
       request(`/api/live/${id}/moderate`, { method: "POST", body: data }),
   },
@@ -307,6 +462,16 @@ export const api = {
       request<{ moderationSettings: Record<string, unknown> }>("/api/creator/moderation"),
     updateModerationSettings: (data: Record<string, unknown>) =>
       request("/api/creator/moderation", { method: "PUT", body: data }),
+    getIntegrations: () =>
+      request<{ integrations: Record<string, unknown> }>("/api/creator/integrations"),
+    updateIntegrations: (data: Record<string, unknown>) =>
+      request("/api/creator/integrations", { method: "PUT", body: data }),
+    getIntegrationTokens: () =>
+      request<{ streamlabsToken: string | null; obsHost: string | null; obsPort: number | null; obsPassword: string | null }>("/api/creator/integrations/token"),
+    getStreamKey: () =>
+      request<{ streamKey: string; rtmpUrl: string }>("/api/creator/stream-key"),
+    regenerateStreamKey: () =>
+      request<{ streamKey: string; rtmpUrl: string }>("/api/creator/stream-key", { method: "POST" }),
   },
 
   // ── Ads ──
@@ -348,7 +513,7 @@ export const api = {
   uploadWithProgress: (
     file: File,
     onProgress: (percent: number) => void
-  ): { promise: Promise<{ url: string; path: string }>; abort: () => void } => {
+  ): { promise: Promise<{ url: string; path: string; queued?: boolean; uploadId?: string }>; abort: () => void } => {
     const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks — small enough for mobile connections
     const MAX_RETRIES = 5;
     let aborted = false;
@@ -405,7 +570,19 @@ export const api = {
       });
     }
 
-    const promise = (async (): Promise<{ url: string; path: string }> => {
+    const promise = (async (): Promise<{ url: string; path: string; queued?: boolean; uploadId?: string }> => {
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        const { enqueueUploadFile } = await import("@/lib/offline/upload-queue");
+        const job = await enqueueUploadFile(file);
+        onProgress(100);
+        return {
+          url: "",
+          path: `queued://${job.uploadId}`,
+          queued: true,
+          uploadId: job.uploadId,
+        };
+      }
+
       // Check for already-uploaded chunks (resume support)
       let completedChunks: number[] = [];
       try {
@@ -508,65 +685,3 @@ export const api = {
   },
 };
 
-// ── Legacy exports for backward compatibility during migration ──
-// These will be removed once all pages are updated to use the api object
-export async function fetchVideos() {
-  const res = await api.videos.list();
-  return (res as { videos: unknown[] }).videos || [];
-}
-
-export async function fetchVideo(id: string) {
-  try {
-    const res = await api.videos.get(id);
-    return (res as { video: unknown }).video;
-  } catch {
-    return undefined;
-  }
-}
-
-export async function fetchSeries(id: string) {
-  try {
-    const res = await api.series.get(id);
-    return (res as { series: unknown }).series;
-  } catch {
-    return undefined;
-  }
-}
-
-export async function fetchAllSeries() {
-  const res = await api.series.list();
-  return (res as { series: unknown[] }).series || [];
-}
-
-export async function fetchUser(id: string) {
-  try {
-    const res = await api.users.get(id);
-    return (res as { user: unknown }).user;
-  } catch {
-    return undefined;
-  }
-}
-
-export async function fetchLiveRooms() {
-  const res = await api.live.list();
-  return (res as { streams: unknown[] }).streams || [];
-}
-
-export async function fetchLiveRoom(id: string) {
-  try {
-    const res = await api.live.get(id);
-    return (res as { stream: unknown }).stream;
-  } catch {
-    return undefined;
-  }
-}
-
-export async function fetchNotifications() {
-  const res = await api.notifications.list();
-  return (res as { notifications: unknown[] }).notifications || [];
-}
-
-export async function searchVideos(query: string) {
-  const res = await api.search({ q: query, type: "videos" });
-  return (res as { videos: unknown[] }).videos || [];
-}

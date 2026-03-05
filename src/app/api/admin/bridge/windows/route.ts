@@ -12,8 +12,8 @@ export async function GET() {
   const result = await bridgeFetch("/api/windows");
   if (!result.ok) {
     return NextResponse.json(
-      { error: "Bridge unavailable" },
-      { status: 502 }
+      result.data || { error: "Bridge unavailable" },
+      { status: result.status }
     );
   }
   return NextResponse.json(result.data);

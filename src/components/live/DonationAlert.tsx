@@ -13,8 +13,8 @@ export interface DonationAlertData {
   tierIcon: string;
   amount: number;
   rarityColor: string;
-  animationType: "sparkle" | "explosion" | "none";
-  category: "basic" | "premium";
+  animationType: "sparkle" | "explosion" | "takeover" | "none";
+  category: "basic" | "premium" | "legendary";
 }
 
 interface DonationAlertProps {
@@ -204,6 +204,92 @@ function ExplosionParticles({ color, count = 40 }: { color: string; count?: numb
   );
 }
 
+// Takeover particles for legendary gifts (50+ particles with multiple waves)
+function TakeoverParticles({ color, count = 60 }: { color: string; count?: number }) {
+  return (
+    <div className="absolute inset-0 pointer-events-none overflow-hidden">
+      {/* First wave - burst from center */}
+      {Array.from({ length: count }).map((_, i) => {
+        const angle = (360 / count) * i + Math.random() * 15;
+        const distance = 150 + Math.random() * 200;
+        const size = 6 + Math.random() * 12;
+        const delay = Math.random() * 0.2;
+        const duration = 1 + Math.random() * 1;
+        const isGold = i % 5 === 0;
+        const isStar = i % 7 === 0;
+        return (
+          <div
+            key={`wave1-${i}`}
+            className="absolute left-1/2 top-1/2"
+            style={{
+              width: isStar ? size * 1.5 : size,
+              height: isStar ? size * 1.5 : size,
+              backgroundColor: isGold ? "#FFD700" : i % 3 === 0 ? color : i % 3 === 1 ? "white" : "#FDE68A",
+              borderRadius: isStar ? "2px" : "50%",
+              boxShadow: `0 0 ${size * 4}px ${isGold ? "#FFD700" : color}`,
+              animation: `donation-particle ${duration}s ease-out ${delay}s forwards`,
+              transform: `translate(-50%, -50%) rotate(${isStar ? angle : 0}deg)`,
+              ["--tx" as string]: `${Math.cos(angle * Math.PI / 180) * distance}px`,
+              ["--ty" as string]: `${Math.sin(angle * Math.PI / 180) * distance}px`,
+              opacity: 0,
+            }}
+          />
+        );
+      })}
+
+      {/* Second wave - delayed larger particles */}
+      {Array.from({ length: 20 }).map((_, i) => {
+        const angle = (360 / 20) * i;
+        const distance = 100 + Math.random() * 150;
+        const size = 10 + Math.random() * 15;
+        return (
+          <div
+            key={`wave2-${i}`}
+            className="absolute left-1/2 top-1/2"
+            style={{
+              width: size,
+              height: size,
+              backgroundColor: i % 2 === 0 ? color : "#FFD700",
+              borderRadius: "50%",
+              boxShadow: `0 0 ${size * 5}px ${color}`,
+              animation: `donation-particle 1.5s ease-out 0.3s forwards`,
+              transform: `translate(-50%, -50%)`,
+              ["--tx" as string]: `${Math.cos(angle * Math.PI / 180) * distance}px`,
+              ["--ty" as string]: `${Math.sin(angle * Math.PI / 180) * distance}px`,
+              opacity: 0,
+            }}
+          />
+        );
+      })}
+
+      {/* Multiple shockwave rings */}
+      {[0, 0.2, 0.4].map((delay, i) => (
+        <div
+          key={`ring-${i}`}
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full"
+          style={{
+            border: `${4 - i}px solid ${color}`,
+            animation: `donation-shockwave 1.2s ease-out ${delay}s forwards`,
+            width: 0,
+            height: 0,
+            opacity: 0,
+          }}
+        />
+      ))}
+
+      {/* Radial glow pulse */}
+      <div
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full animate-takeover-particles"
+        style={{
+          width: 100,
+          height: 100,
+          background: `radial-gradient(circle, ${color}80 0%, transparent 70%)`,
+        }}
+      />
+    </div>
+  );
+}
+
 // ─── Sound generator ─────────────────────────────────────────────────────────
 
 function playDonationSound(tier: string) {
@@ -211,7 +297,64 @@ function playDonationSound(tier: string) {
     const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
     const now = ctx.currentTime;
 
-    if (tier === "sparkle") {
+    if (tier === "takeover") {
+      // Epic orchestral flourish with bass drop for legendary gifts
+      // Bass drop
+      const bass = ctx.createOscillator();
+      const bassGain = ctx.createGain();
+      bass.connect(bassGain);
+      bassGain.connect(ctx.destination);
+      bass.type = "sine";
+      bass.frequency.setValueAtTime(80, now);
+      bass.frequency.exponentialRampToValueAtTime(40, now + 0.5);
+      bassGain.gain.setValueAtTime(0.3, now);
+      bassGain.gain.exponentialRampToValueAtTime(0.001, now + 1);
+      bass.start(now);
+      bass.stop(now + 1);
+
+      // Orchestral fanfare
+      const fanfare = [523, 659, 784, 1047, 1319, 1568, 1047, 1319, 1568, 2093];
+      fanfare.forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = freq;
+        osc.type = i < 6 ? "triangle" : "sine";
+        const t = now + i * 0.08;
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(0.2, t + 0.02);
+        gain.gain.setValueAtTime(0.2, t + 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+        osc.start(t);
+        osc.stop(t + 0.5);
+      });
+
+      // Shimmer wash
+      const shimmer = ctx.createOscillator();
+      const shimmerGain = ctx.createGain();
+      shimmer.connect(shimmerGain);
+      shimmerGain.connect(ctx.destination);
+      shimmer.frequency.value = 4000;
+      shimmer.type = "sine";
+      shimmerGain.gain.setValueAtTime(0, now + 0.3);
+      shimmerGain.gain.linearRampToValueAtTime(0.08, now + 0.4);
+      shimmerGain.gain.exponentialRampToValueAtTime(0.001, now + 2);
+      shimmer.start(now + 0.3);
+      shimmer.stop(now + 2);
+
+      // Impact hit
+      const impact = ctx.createOscillator();
+      const impactGain = ctx.createGain();
+      impact.connect(impactGain);
+      impactGain.connect(ctx.destination);
+      impact.type = "sawtooth";
+      impact.frequency.value = 150;
+      impactGain.gain.setValueAtTime(0.25, now + 0.5);
+      impactGain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+      impact.start(now + 0.5);
+      impact.stop(now + 0.8);
+    } else if (tier === "sparkle") {
       // Light, sparkly ascending chime
       [523, 659, 784, 1047].forEach((freq, i) => {
         const osc = ctx.createOscillator();
@@ -317,7 +460,7 @@ function playDonationSound(tier: string) {
       shimmer.stop(now + 1.2);
     }
 
-    setTimeout(() => ctx.close(), 2000);
+    setTimeout(() => ctx.close(), tier === "takeover" ? 3000 : 2000);
   } catch {
     // Audio not supported
   }
@@ -335,8 +478,14 @@ export default function DonationAlert({ alert, onComplete }: DonationAlertProps)
       return;
     }
 
-    // Play sound
-    playDonationSound(alert.tierIcon);
+    // Play sound based on animation type
+    const soundType = alert.animationType === "takeover" ? "takeover" : alert.tierIcon;
+    playDonationSound(soundType);
+
+    // Determine display duration based on category
+    let showDuration = 2500; // basic
+    if (alert.category === "premium") showDuration = 4000;
+    if (alert.category === "legendary" || alert.animationType === "takeover") showDuration = 6000;
 
     // Enter
     setPhase("enter");
@@ -347,8 +496,8 @@ export default function DonationAlert({ alert, onComplete }: DonationAlertProps)
         timerRef.current = setTimeout(() => {
           setPhase("idle");
           onComplete();
-        }, 600);
-      }, alert.category === "premium" ? 4000 : 2500);
+        }, alert.animationType === "takeover" ? 1000 : 600);
+      }, showDuration);
     }, 100);
 
     return () => {
@@ -359,6 +508,132 @@ export default function DonationAlert({ alert, onComplete }: DonationAlertProps)
   if (!alert || phase === "idle") return null;
 
   const isPremium = alert.category === "premium";
+  const isLegendary = alert.category === "legendary" || alert.animationType === "takeover";
+  const isTakeover = alert.animationType === "takeover";
+
+  // Takeover animation - full screen dark overlay with massive icon
+  if (isTakeover) {
+    return (
+      <>
+        <style>{`
+          @keyframes donation-particle {
+            0% { opacity: 1; transform: translate(-50%, -50%) translate(0, 0) scale(1); }
+            100% { opacity: 0; transform: translate(-50%, -50%) translate(var(--tx), var(--ty)) scale(0.2); }
+          }
+          @keyframes donation-shockwave {
+            0% { width: 0; height: 0; opacity: 0.8; }
+            100% { width: 400px; height: 400px; opacity: 0; margin-left: -200px; margin-top: -200px; }
+          }
+          @keyframes takeover-text-glow {
+            0%, 100% { text-shadow: 0 0 20px var(--glow-color), 0 0 40px var(--glow-color); }
+            50% { text-shadow: 0 0 40px var(--glow-color), 0 0 80px var(--glow-color), 0 0 120px var(--glow-color); }
+          }
+          @keyframes takeover-counter {
+            0% { transform: scale(0.5); opacity: 0; }
+            50% { transform: scale(1.2); }
+            100% { transform: scale(1); opacity: 1; }
+          }
+        `}</style>
+
+        {/* Full-screen dark overlay */}
+        <div
+          className={cn(
+            "fixed inset-0 z-[100] flex items-center justify-center",
+            phase === "enter" && "opacity-0",
+            phase === "show" && "animate-takeover-bg",
+            phase === "exit" && "opacity-0 transition-opacity duration-1000"
+          )}
+          style={{ backgroundColor: "rgba(0,0,0,0.85)" }}
+        >
+          {/* Particles */}
+          {phase === "show" && <TakeoverParticles color={alert.rarityColor} count={60} />}
+
+          {/* Main content */}
+          <div className="relative z-10 flex flex-col items-center">
+            {/* Massive icon */}
+            <div
+              className={cn(
+                "mb-8",
+                phase === "show" && "animate-takeover-icon"
+              )}
+              style={{
+                filter: `drop-shadow(0 0 60px ${alert.rarityColor}) drop-shadow(0 0 100px ${alert.rarityColor})`,
+              }}
+            >
+              <span className="text-[120px] sm:text-[180px]">{getTierIcon(alert.tierIcon, alert.rarityColor) || alert.tierIcon}</span>
+            </div>
+
+            {/* Sender name with glow trail */}
+            <div
+              className={cn(
+                "mb-2",
+                phase === "show" && "animate-takeover-amount"
+              )}
+            >
+              {alert.avatar && (
+                <img
+                  src={alert.avatar}
+                  alt=""
+                  className="w-16 h-16 mx-auto mb-3 rounded-full border-4 shadow-2xl"
+                  style={{
+                    borderColor: alert.rarityColor,
+                    boxShadow: `0 0 30px ${alert.rarityColor}`,
+                  }}
+                />
+              )}
+              <p
+                className="text-2xl sm:text-3xl font-black text-white text-center"
+                style={{
+                  ["--glow-color" as string]: alert.rarityColor,
+                  animation: phase === "show" ? "takeover-text-glow 1.5s ease-in-out infinite" : "none",
+                }}
+              >
+                {alert.from}
+              </p>
+              <p className="text-lg text-white/60 text-center mt-1">sent a</p>
+            </div>
+
+            {/* Tier name - huge */}
+            <div
+              className={cn(
+                "mb-6",
+                phase === "show" && "animate-takeover-amount"
+              )}
+              style={{ animationDelay: "0.3s" }}
+            >
+              <p
+                className="text-5xl sm:text-7xl font-black text-center uppercase tracking-wider"
+                style={{
+                  color: alert.rarityColor,
+                  textShadow: `0 0 30px ${alert.rarityColor}, 0 0 60px ${alert.rarityColor}, 0 0 100px ${alert.rarityColor}80`,
+                }}
+              >
+                {alert.tierName}
+              </p>
+            </div>
+
+            {/* Amount with typewriter/counter effect */}
+            <div
+              className={cn(
+                phase === "show" && "opacity-100"
+              )}
+              style={{
+                animation: phase === "show" ? "takeover-counter 0.8s ease-out 0.6s forwards" : "none",
+                opacity: 0,
+              }}
+            >
+              <p
+                className="text-4xl sm:text-5xl font-black text-center"
+                style={{ color: alert.rarityColor }}
+              >
+                {alert.amount.toLocaleString()} credits
+              </p>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>

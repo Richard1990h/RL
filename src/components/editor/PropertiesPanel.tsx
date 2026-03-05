@@ -1673,7 +1673,7 @@ function EffectsSection({
                 preset.filters.map((f) => ({
                   ...f,
                   startTime: 0,
-                  endTime: 0,
+                  endTime: editState?.duration ?? 0,
                 }))
               )
             }

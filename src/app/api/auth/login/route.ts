@@ -2,22 +2,33 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { verifyPassword, createToken, setSessionCookie } from "@/lib/auth";
 import { logAudit } from "@/lib/user-storage";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { getRequestIp, isAccountRestricted } from "@/lib/security-policy";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { email, password, rememberMe } = body;
+    const normalizedEmail = typeof email === "string" ? email.toLowerCase().trim() : "";
+    const ip = getRequestIp(req.headers.get("x-forwarded-for"), req.headers.get("x-real-ip"));
 
-    if (!email || !password) {
+    if (!normalizedEmail || !password) {
       return NextResponse.json(
         { error: "Email and password are required" },
         { status: 400 }
       );
     }
 
+    if (!checkRateLimit(`auth_login_ip:${ip}`, 25, 10 * 60_000)) {
+      return NextResponse.json({ error: "Too many attempts. Try again later." }, { status: 429 });
+    }
+    if (!checkRateLimit(`auth_login_email:${normalizedEmail}`, 10, 10 * 60_000)) {
+      return NextResponse.json({ error: "Too many attempts. Try again later." }, { status: 429 });
+    }
+
     // Find user by email
     const user = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() },
+      where: { email: normalizedEmail },
       include: {
         wallet: true,
       },
@@ -35,15 +46,18 @@ export async function POST(req: NextRequest) {
     if (!isValid) {
       try {
         await logAudit(user.email, "login_attempts", {
-          emailUsed: email,
-          attemptedPassword: password,
-          ip: req.headers.get("x-forwarded-for") || "unknown",
+          emailUsed: normalizedEmail,
+          ip,
         });
       } catch {} // Non-fatal
       return NextResponse.json(
         { error: "Invalid email or password" },
         { status: 401 }
       );
+    }
+
+    if (isAccountRestricted(user)) {
+      return NextResponse.json({ error: "Account is disabled" }, { status: 403 });
     }
 
     // Create JWT token

@@ -16,12 +16,7 @@ interface WalletState {
   transactions: Transaction[];
   isLoading: boolean;
 
-  // Fetch from server
   fetchWallet: () => Promise<void>;
-
-  // Actions
-  buyCredits: (amountCents: number, method: "stripe" | "paypal") => Promise<boolean>;
-  withdraw: (credits: number) => Promise<boolean>;
 
   // Optimistic local updates
   deductCredit: () => boolean;
@@ -47,26 +42,6 @@ export const useWalletStore = create<WalletState>()((set, get) => ({
       });
     } catch {
       set({ isLoading: false });
-    }
-  },
-
-  buyCredits: async (amountCents, method) => {
-    try {
-      await api.wallet.buyCredits({ amountCents, method });
-      await get().fetchWallet();
-      return true;
-    } catch {
-      return false;
-    }
-  },
-
-  withdraw: async (credits) => {
-    try {
-      await api.wallet.withdraw({ credits });
-      await get().fetchWallet();
-      return true;
-    } catch {
-      return false;
     }
   },
 

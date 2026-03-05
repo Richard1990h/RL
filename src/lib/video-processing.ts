@@ -257,8 +257,19 @@ export async function mergeRecordingChunks(recordingId: string, inputPath: strin
   const outputName = `recording_${recordingId}_${Date.now()}.mp4`;
   const absoluteOutput = path.join(process.cwd(), RECORDINGS_DIR, outputName);
 
+  const updateProgress = async (progress: number) => {
+    try {
+      await prisma.recording.update({
+        where: { id: recordingId },
+        data: { progress: Math.round(progress) },
+      });
+    } catch {}
+  };
+
   try {
+    await updateProgress(75);
     const durationSec = await probeDuration(absoluteInput);
+    await updateProgress(80);
 
     // CRITICAL: +faststart required — see comment in processVideo()
     await runFfmpeg([
@@ -274,6 +285,8 @@ export async function mergeRecordingChunks(recordingId: string, inputPath: strin
       absoluteOutput,
     ], `recording merge ${recordingId}`);
 
+    await updateProgress(95);
+
     const stat = await fs.stat(absoluteOutput);
     const relativeOutput = `/${RECORDINGS_DIR}/${outputName}`;
 
@@ -281,6 +294,7 @@ export async function mergeRecordingChunks(recordingId: string, inputPath: strin
       filePath: relativeOutput,
       status: "READY",
       sizeBytes: stat.size,
+      progress: 100,
     };
 
     if (durationSec > 0) {
@@ -306,7 +320,7 @@ export async function mergeRecordingChunks(recordingId: string, inputPath: strin
     try {
       await prisma.recording.update({
         where: { id: recordingId },
-        data: { status: "FAILED" },
+        data: { status: "FAILED", progress: 0 },
       });
     } catch (dbErr) {
       console.error(`[recording] Could not mark recording ${recordingId} as FAILED:`, dbErr);
@@ -594,11 +608,8 @@ function buildVideoFilters(edits: EditOptions, scale: string): string {
         case "temperature": {
           // Warm (>100) adds red/yellow, cool (<100) adds blue
           const tempShift = (f.value - 100) / 100;
-          if (tempShift > 0) {
-            filters.push(`colorbalance=rs=${(tempShift * 0.3).toFixed(2)}:gs=${(tempShift * 0.1).toFixed(2)}:bs=${(-tempShift * 0.3).toFixed(2)}:${enable}`);
-          } else {
-            filters.push(`colorbalance=rs=${(tempShift * 0.3).toFixed(2)}:gs=${(tempShift * 0.1).toFixed(2)}:bs=${(-tempShift * 0.3).toFixed(2)}:${enable}`);
-          }
+          // tempShift > 0 = warm (boost reds, reduce blues), < 0 = cool (boost blues, reduce reds)
+          filters.push(`colorbalance=rs=${(tempShift * 0.3).toFixed(2)}:gs=${(tempShift * 0.1).toFixed(2)}:bs=${(-tempShift * 0.3).toFixed(2)}:${enable}`);
           break;
         }
         case "tint": {

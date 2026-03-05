@@ -5,6 +5,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useWalletStore } from "@/stores/wallet-store";
 import { useFriendsStore } from "@/stores/friends-store";
 import { useNotificationStore } from "@/stores/notification-store";
+import { initOfflineEngine } from "@/lib/offline/bootstrap";
 
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
   const { checkSession, isLoggedIn } = useAuthStore();
@@ -13,6 +14,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   const { startPolling: startNotifPolling, stopPolling: stopNotifPolling } = useNotificationStore();
 
   useEffect(() => {
+    initOfflineEngine();
     checkSession();
   }, [checkSession]);
 

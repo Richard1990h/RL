@@ -135,7 +135,7 @@ export default function LivePage() {
 
       {/* Go Live FAB - mobile only */}
       <button
-        onClick={() => router.push('/go-live')}
+        onClick={() => router.push('/upload-stream?tab=go-live')}
         className="
           fixed bottom-20 right-4 z-40 md:hidden
           w-14 h-14 rounded-full

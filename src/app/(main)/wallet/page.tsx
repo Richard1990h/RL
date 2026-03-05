@@ -33,7 +33,7 @@ import { cn } from "@/lib/utils";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type MainTab = "buy-credits" | "withdraw" | "history";
+type MainTab = "buy-credits" | "catalog" | "withdraw" | "history";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -46,6 +46,7 @@ const CREDIT_PACKAGES = [
 
 const MAIN_TABS = [
   { id: "buy-credits", label: "Buy Credits" },
+  { id: "catalog", label: "Catalog" },
   { id: "withdraw", label: "Withdraw" },
   { id: "history", label: "History" },
 ];
@@ -57,6 +58,21 @@ const HISTORY_TABS = [
   { id: "DONATION", label: "Donations" },
   { id: "CREDIT_EARNED", label: "Earned" },
 ];
+
+const CATALOG_CATEGORIES = ["All", "Funny", "Luxury", "Cosmic", "Rare"] as const;
+
+const CATALOG_ITEMS = [
+  { id: "duck", name: "Rubber Duck", credits: 1, category: "Funny", emoji: "🦆" },
+  { id: "pizza", name: "Pizza Slice", credits: 10, category: "Funny", emoji: "🍕" },
+  { id: "party", name: "Party Popper", credits: 25, category: "Funny", emoji: "🎉" },
+  { id: "ring", name: "Gold Ring", credits: 200, category: "Luxury", emoji: "💍" },
+  { id: "crown", name: "Platinum Crown", credits: 10000, category: "Luxury", emoji: "👑" },
+  { id: "moon", name: "Crescent Moon", credits: 10, category: "Cosmic", emoji: "🌙" },
+  { id: "comet", name: "Comet", credits: 50, category: "Cosmic", emoji: "☄️" },
+  { id: "nebula", name: "Nebula", credits: 500, category: "Cosmic", emoji: "🌌" },
+  { id: "clover", name: "Four Leaf Clover", credits: 3, category: "Rare", emoji: "🍀" },
+  { id: "gem", name: "Infinity Gem", credits: 5000, category: "Rare", emoji: "💎" },
+] as const;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -229,6 +245,7 @@ export default function WalletPage() {
 
   // ─── History state ───────────────────────────────────────────────────────
   const [historyFilter, setHistoryFilter] = useState("all");
+  const [catalogCategory, setCatalogCategory] = useState<(typeof CATALOG_CATEGORIES)[number]>("All");
 
   // ─── Load wallet + PayPal config + fee config on mount ─────────────────
   useEffect(() => {
@@ -256,6 +273,11 @@ export default function WalletPage() {
     if (historyFilter === "all") return storeTransactions;
     return storeTransactions.filter((t) => t.type === historyFilter);
   }, [storeTransactions, historyFilter]);
+
+  const filteredCatalogItems = useMemo(() => {
+    if (catalogCategory === "All") return CATALOG_ITEMS;
+    return CATALOG_ITEMS.filter((item) => item.category === catalogCategory);
+  }, [catalogCategory]);
 
   // When a preset package is selected, use its fixed price and credit count.
   // When a custom dollar amount is entered, calculate credits from fees.
@@ -587,6 +609,54 @@ export default function WalletPage() {
                     </div>
                   </>
                 )}
+              </div>
+            )}
+
+            {/* TAB 2: CATALOG */}
+            {activeTab === "catalog" && (
+              <div className="space-y-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Gift size={18} className="text-accent" />
+                    <h2 className="text-lg font-semibold text-text">Credits Catalog</h2>
+                  </div>
+                  <Button variant="primary" size="sm" onClick={() => setActiveTab("buy-credits")}>
+                    Buy Credits
+                  </Button>
+                </div>
+                <p className="text-sm text-text-secondary">
+                  Send gifts during streams and messages. Prices are shown in credits.
+                </p>
+
+                <div className="flex flex-wrap gap-2">
+                  {CATALOG_CATEGORIES.map((category) => (
+                    <button
+                      key={category}
+                      onClick={() => setCatalogCategory(category)}
+                      className={cn(
+                        "rounded-full px-3 py-1.5 text-xs font-semibold transition-colors",
+                        catalogCategory === category
+                          ? "bg-primary text-white"
+                          : "bg-bg-surface2 text-text-secondary hover:text-text"
+                      )}
+                    >
+                      {category}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+                  {filteredCatalogItems.map((item) => (
+                    <div key={item.id} className="rounded-xl border border-border bg-bg-surface2 p-3">
+                      <div className="mb-2 flex h-14 items-center justify-center rounded-lg bg-bg-surface3 text-3xl">
+                        <span>{item.emoji}</span>
+                      </div>
+                      <p className="truncate text-sm font-semibold text-text">{item.name}</p>
+                      <p className="text-xs text-text-muted">{item.category}</p>
+                      <p className="mt-1 text-sm font-bold text-primary">{item.credits.toLocaleString()} credits</p>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 

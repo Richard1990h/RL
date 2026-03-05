@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Send, Swords, Loader2 } from "lucide-react";
+import { Send, Loader2, UserPlus, Check, X } from "lucide-react";
 import type { User } from "@/lib/types";
 import Avatar from "@/components/ui/Avatar";
 
@@ -11,6 +11,8 @@ interface ChatMessage {
   text: string;
   timestamp: number;
 }
+
+type RequestStatus = "none" | "pending" | "accepted" | "rejected";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -24,9 +26,11 @@ interface ChatPanelProps {
   inQueue?: boolean;
   /** Credit cost to join (0 = free) */
   queueCost?: number;
+  /** Request-to-join status for guest approval flow */
+  requestStatus?: RequestStatus;
 }
 
-export default function ChatPanel({ messages, onSend, users, onJoinQueue, queueJoining, inQueue, queueCost }: ChatPanelProps) {
+export default function ChatPanel({ messages, onSend, users, onJoinQueue, queueJoining, inQueue, queueCost, requestStatus }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -85,29 +89,43 @@ export default function ChatPanel({ messages, onSend, users, onJoinQueue, queueJ
         })}
       </div>
 
-      {/* Join Queue Button (shown above input if available) */}
+      {/* Join Queue / Request to Join Button (shown above input if available) */}
       {onJoinQueue && (
         <div className="px-3 pt-2 shrink-0">
           <button
             onClick={onJoinQueue}
-            disabled={queueJoining || inQueue}
+            disabled={queueJoining || inQueue || requestStatus === "pending" || requestStatus === "accepted"}
             className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-radius-md text-sm font-semibold transition-all ${
-              inQueue
+              inQueue || requestStatus === "accepted"
                 ? "bg-success/10 text-success border border-success/30 cursor-default"
+                : requestStatus === "pending"
+                ? "bg-warning/10 text-warning border border-warning/30 cursor-default"
+                : requestStatus === "rejected"
+                ? "bg-danger/10 text-danger border border-danger/30 cursor-default"
                 : "bg-gradient-to-r from-primary to-accent text-white hover:opacity-90 disabled:opacity-50"
             }`}
           >
             {queueJoining ? (
               <Loader2 size={16} className="animate-spin" />
-            ) : inQueue ? (
+            ) : requestStatus === "accepted" || inQueue ? (
               <>
-                <Swords size={16} />
-                In Queue
+                <Check size={16} />
+                Joined!
+              </>
+            ) : requestStatus === "pending" ? (
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                Request Pending...
+              </>
+            ) : requestStatus === "rejected" ? (
+              <>
+                <X size={16} />
+                Request Denied
               </>
             ) : (
               <>
-                <Swords size={16} />
-                Join Battle Queue{queueCost && queueCost > 0 ? ` (${queueCost} credits)` : ""}
+                <UserPlus size={16} />
+                Request to Join{queueCost && queueCost > 0 ? ` (${queueCost} credits)` : ""}
               </>
             )}
           </button>

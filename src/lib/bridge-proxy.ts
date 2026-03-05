@@ -26,7 +26,13 @@ export async function bridgeFetch(path: string, options: BridgeFetchOptions = {}
       signal: controller.signal,
     });
 
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: `Non-JSON response: ${text.substring(0, 200)}` };
+    }
     return { ok: res.ok, status: res.status, data };
   } catch (err: unknown) {
     if (err instanceof Error && err.name === "AbortError") {

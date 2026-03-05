@@ -41,6 +41,7 @@ export type TickHandler = (state: GameState, deltaMs: number) => GameState;
 export interface GameEngineCallbacks {
   onStateUpdate: (state: GameState) => void;
   onGameEnd: (state: GameState) => void;
+  onElimination?: (state: GameState, eliminatedUserIds: string[]) => void;
 }
 
 export class GameEngine {
@@ -80,8 +81,25 @@ export class GameEngine {
       const delta = now - this.lastTick;
       this.lastTick = now;
 
+      // Snapshot eliminated players before tick
+      const eliminatedBefore = new Set(
+        Object.keys(this.state.players).filter((id) => this.state.players[id].isEliminated)
+      );
+
       this.state = this.tickHandler(this.state, delta);
       this.state.lastUpdate = now;
+
+      // Detect newly eliminated players
+      if (this.callbacks.onElimination) {
+        const newlyEliminated = Object.keys(this.state.players).filter(
+          (id) => this.state.players[id].isEliminated && !eliminatedBefore.has(id)
+        );
+        if (newlyEliminated.length > 0) {
+          // Fire-and-forget async
+          Promise.resolve().then(() => this.callbacks.onElimination!(this.state, newlyEliminated));
+        }
+      }
+
       this.callbacks.onStateUpdate(this.state);
 
       if (this.state.phase === "finished") {

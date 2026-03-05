@@ -8,7 +8,7 @@ const MESSAGE_QUEUE_FILE = path.join(
   process.env.USERPROFILE || "C:\\Users\\Richard",
   ".claude",
   "projects",
-  "C--Users-Richard-Desktop-Rally-Live",
+  "C--Users-Richard-Desktop-RallyLive-ca",
   "message-queue.json"
 );
 

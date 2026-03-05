@@ -26,9 +26,14 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useGameStore } from "@/stores/game-store";
 import { SSEClient } from "@/lib/sse/sse-client";
 import type { LiveRoom, User, DonationTier, TowerUnit } from "@/lib/types";
+import { DONATION_TIERS as REAL_DONATION_TIERS, TOWER_WARS_STATS } from "@/lib/donation-tiers";
 import type { GameState } from "@/lib/games/game-engine";
 import ParticipantBox from "@/components/battle/ParticipantBox";
 import LeaderboardPanel from "@/components/battle/LeaderboardPanel";
+import BattleBar from "@/components/battle/BattleBar";
+import SplitScreenBattle from "@/components/battle/SplitScreenBattle";
+import PowerUpPanel from "@/components/battle/PowerUpPanel";
+import VictoryLap from "@/components/battle/VictoryLap";
 import ChatPanel from "@/components/live/ChatPanel";
 import GiftPanel from "@/components/credits/GiftPanel";
 import DonateButton from "@/components/credits/DonateButton";
@@ -477,125 +482,180 @@ function StandardBattle({ room, host }: { room: LiveRoom; host: User }) {
 }
 
 /* ============================================================
-   TIMER WARS BATTLE MODE
+   TIMER WARS BATTLE MODE (Server-driven via SSE)
    ============================================================ */
 
 function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
   const router = useRouter();
-  const state = useBattleState(room, host);
-  const {
-    userMap, users, participantIds, scores, setScores, round, setRound,
-    eliminatedUsers, setEliminatedUsers, timer, setTimer, isTimerRunning, setIsTimerRunning,
-    showGiftPanel, setShowGiftPanel, showSidePanel, setShowSidePanel,
-    sideTab, setSideTab, chatMessages, addScore, addChat, banner, showBanner, winner, setWinner,
-  } = state;
+  const { gameState, setGameState, setConnected } = useGameStore();
+  const { currentUser } = useAuthStore();
+  const sseRef = useRef<SSEClient | null>(null);
+
+  // Local UI state
+  const [showGiftPanel, setShowGiftPanel] = useState(false);
+  const [showSidePanel, setShowSidePanel] = useState(false);
+  const [sideTab, setSideTab] = useState("gifts");
+  const [banner, setBanner] = useState<string | null>(null);
+  const [selectedTier, setSelectedTier] = useState<DonationTier | null>(null);
+  const [showPlayerSelect, setShowPlayerSelect] = useState(false);
+  const [giftLoading, setGiftLoading] = useState(false);
+  const [chatMessages, setChatMessages] = useState<
+    { id: string; userId: string; text: string; timestamp: number }[]
+  >([]);
+  const [activePowerUps, setActivePowerUps] = useState<
+    { type: string; targetId: string; expiresAt: number }[]
+  >([]);
+  const prevEliminatedRef = useRef<Set<string>>(new Set());
+  const prevWinnerRef = useRef<string | null>(null);
 
   const hostId = room.hostId;
 
-  const activeParticipants = useMemo(
-    () => room.participants.filter((p) => !eliminatedUsers.includes(p.userId)),
-    [room.participants, eliminatedUsers]
-  );
+  // SSE connection
+  useEffect(() => {
+    if (!currentUser) return;
+    const sse = new SSEClient({
+      url: `/api/live/${room.id}/game/state?userId=${currentUser.id}`,
+      onMessage: (event, data) => {
+        if (event === "game-state") setGameState(data as GameState);
+        if (event === "game-event") {
+          const evt = data as { event: string; data: Record<string, unknown> };
+          if (evt.event === "gift") {
+            const d = evt.data;
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                id: `gift-${Date.now()}-${Math.random()}`,
+                userId: "system",
+                text: `${d.senderName} sent ${d.amount} credits to ${d.targetName}!`,
+                timestamp: Date.now(),
+              },
+            ]);
+          }
+        }
+      },
+      onOpen: () => setConnected(true),
+      onClose: () => setConnected(false),
+    });
+    sse.connect();
+    sseRef.current = sse;
+    return () => sse.disconnect();
+  }, [room.id, currentUser?.id, setGameState, setConnected]);
 
-  const nonHostActive = useMemo(
-    () => activeParticipants.filter((p) => p.userId !== hostId),
-    [activeParticipants, hostId]
+  // Derive state from gameState
+  const players = gameState?.players || {};
+  const activePlayers = useMemo(
+    () => Object.values(players).filter((p) => !p.isEliminated),
+    [players]
   );
+  const round = gameState?.round || 1;
+  const maxRounds = gameState?.maxRounds || 5;
+  const timeRemaining = gameState?.timeRemaining ?? 60;
+  const timer = Math.ceil(timeRemaining);
+  const winner = gameState?.winner || null;
+  const phase = gameState?.phase || "waiting";
+
+  // Show banners for eliminations / winner
+  useEffect(() => {
+    if (!gameState) return;
+    const currentEliminated = new Set(
+      Object.keys(players).filter((id) => players[id].isEliminated)
+    );
+    // Check for new eliminations
+    for (const id of currentEliminated) {
+      if (!prevEliminatedRef.current.has(id)) {
+        const name = players[id]?.displayName || id;
+        showBannerMsg(`ELIMINATED: ${name}`, 3000);
+        setChatMessages((prev) => [
+          ...prev,
+          { id: `elim-${Date.now()}`, userId: "system", text: `${name} has been eliminated!`, timestamp: Date.now() },
+        ]);
+      }
+    }
+    prevEliminatedRef.current = currentEliminated;
+
+    // Check for winner
+    if (winner && winner !== prevWinnerRef.current) {
+      const winnerName = players[winner]?.displayName || winner;
+      showBannerMsg(`WINNER: ${winnerName}!`, 10000);
+    }
+    prevWinnerRef.current = winner;
+  }, [gameState, players, winner]);
+
+  const showBannerMsg = useCallback((text: string, durationMs = 3000) => {
+    setBanner(text);
+    setTimeout(() => setBanner(null), durationMs);
+  }, []);
+
+  const timerColor = timer > 30 ? "text-success" : timer > 10 ? "text-warning" : "text-danger";
 
   const gridCols = useMemo(() => {
-    const count = activeParticipants.length;
+    const count = Object.keys(players).length;
     if (count <= 2) return "grid-cols-1 sm:grid-cols-2";
     if (count <= 4) return "grid-cols-2";
     if (count <= 6) return "grid-cols-2 lg:grid-cols-3";
     return "grid-cols-2 lg:grid-cols-4";
-  }, [activeParticipants.length]);
+  }, [Object.keys(players).length]);
 
-  // Timer color
-  const timerColor = timer > 30 ? "text-success" : timer > 10 ? "text-warning" : "text-danger";
-
-  // Handle round end when timer hits 0
-  const roundEndHandled = useRef(false);
-
-  useEffect(() => {
-    if (timer > 0 || roundEndHandled.current || winner) return;
-    roundEndHandled.current = true;
-
-    // Find lowest scorer among non-host active
-    const candidates = nonHostActive.map((p) => ({
-      userId: p.userId,
-      score: scores[p.userId] ?? 0,
-    }));
-
-    if (candidates.length === 0) return;
-
-    candidates.sort((a, b) => a.score - b.score);
-    const lowestScore = candidates[0].score;
-    const tied = candidates.filter((c) => c.score === lowestScore);
-
-    if (tied.length > 1 && candidates.length > 1) {
-      // Sudden death
-      showBanner("SUDDEN DEATH - 30 SECONDS", 4000);
-      setTimer(30);
-      setIsTimerRunning(true);
-      roundEndHandled.current = false;
-      return;
-    }
-
-    const eliminatedId = candidates[0].userId;
-    const eliminatedUser = userMap.get(eliminatedId);
-
-    setEliminatedUsers((prev) => [...prev, eliminatedId]);
-    showBanner(`ELIMINATED: ${eliminatedUser?.displayName || eliminatedId}`, 3000);
-    addChat("system", `${eliminatedUser?.displayName || eliminatedId} has been eliminated!`);
-
-    // Check remaining
-    const remainingNonHost = nonHostActive.filter((p) => p.userId !== eliminatedId);
-
-    if (remainingNonHost.length <= 1) {
-      // Winner
-      const winnerId = remainingNonHost.length === 1 ? remainingNonHost[0].userId : hostId;
-      const winUser = userMap.get(winnerId);
-      setTimeout(() => {
-        setWinner(winnerId);
-        showBanner(`WINNER: ${winUser?.displayName || winnerId}!`, 10000);
-      }, 3500);
-    } else if (remainingNonHost.length === 2) {
-      setTimeout(() => {
-        showBanner("FINAL ROUND", 3000);
-        setRound((r) => r + 1);
-        setTimer(room.roundTimeSec || 60);
-        setIsTimerRunning(true);
-        roundEndHandled.current = false;
-      }, 3500);
-    } else {
-      setTimeout(() => {
-        setRound((r) => r + 1);
-        setTimer(room.roundTimeSec || 60);
-        setIsTimerRunning(true);
-        roundEndHandled.current = false;
-      }, 3500);
-    }
-  }, [
-    timer, nonHostActive, scores, winner, userMap, hostId,
-    showBanner, setTimer, setIsTimerRunning, setEliminatedUsers, setRound, addChat, setWinner, room.roundTimeSec,
-  ]);
-
-  const handleGiftSelect = useCallback(
-    (tier: DonationTier) => {
-      const active = activeParticipants.filter((p) => !eliminatedUsers.includes(p.userId));
-      if (active.length === 0) return;
-      const target = active[Math.floor(Math.random() * active.length)];
-      const user = userMap.get(target.userId);
-      addScore(target.userId, tier.valueCents);
-      addChat("system", `sent a ${tier.name} to ${user?.displayName || "someone"}!`);
-      setShowGiftPanel(false);
-    },
-    [activeParticipants, eliminatedUsers, userMap, addScore, addChat, setShowGiftPanel]
+  const maxScore = useMemo(
+    () => Math.max(1, ...Object.values(players).map((p) => p.score)),
+    [players]
   );
 
+  // Is current user eliminated?
+  const isCurrentUserEliminated = currentUser ? players[currentUser.id]?.isEliminated === true : false;
+  const isHostEliminated = players[hostId]?.isEliminated === true;
+
+  // Two-step gift flow: pick tier → pick target player
+  const handleGiftTierSelect = useCallback((tier: DonationTier) => {
+    setSelectedTier(tier);
+    setShowGiftPanel(false);
+    setShowPlayerSelect(true);
+  }, []);
+
+  const handleGiftToPlayer = useCallback(async (targetUserId: string) => {
+    if (!selectedTier || giftLoading) return;
+    setGiftLoading(true);
+    try {
+      const res = await fetch(`/api/live/${room.id}/game/gift`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          targetUserId,
+          amount: selectedTier.valueCents,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        showBannerMsg(data.error || "Gift failed", 2000);
+      }
+    } catch {
+      showBannerMsg("Gift failed", 2000);
+    } finally {
+      setGiftLoading(false);
+      setShowPlayerSelect(false);
+      setSelectedTier(null);
+    }
+  }, [selectedTier, giftLoading, room.id, showBannerMsg]);
+
+  const handleRejoinQueue = useCallback(async () => {
+    await fetch(`/api/live/${room.id}/game/action`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ action: "rejoin_queue" }),
+    });
+    showBannerMsg("Added to rejoin queue!", 2000);
+  }, [room.id, showBannerMsg]);
+
   const handleSendChat = useCallback(
-    (text: string) => addChat("system", text),
-    [addChat]
+    (text: string) => {
+      setChatMessages((prev) => [
+        ...prev,
+        { id: `msg-${Date.now()}-${Math.random()}`, userId: currentUser?.id || "anon", text, timestamp: Date.now() },
+      ]);
+    },
+    [currentUser?.id]
   );
 
   const handleShare = useCallback(() => {
@@ -606,8 +666,49 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
     }
   }, [room.title]);
 
-  // Max score for progress bars
-  const maxScore = useMemo(() => Math.max(1, ...Object.values(scores)), [scores]);
+  // Power-up purchase handler
+  const handlePurchasePowerUp = useCallback(async (type: string, targetId?: string) => {
+    try {
+      const res = await fetch(`/api/live/${room.id}/game/power-up`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ type, targetId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showBannerMsg(data.error || "Failed to purchase power-up", 2000);
+        return;
+      }
+      // Add to local active power-ups for UI
+      if (data.powerUp) {
+        setActivePowerUps((prev) => [
+          ...prev,
+          { type: data.powerUp.type, targetId: targetId || "", expiresAt: new Date(data.powerUp.expiresAt).getTime() },
+        ]);
+      }
+      showBannerMsg(`${type.replace("_", " ")} activated!`, 2000);
+    } catch {
+      showBannerMsg("Failed to purchase power-up", 2000);
+    }
+  }, [room.id, showBannerMsg]);
+
+  // Clean up expired power-ups
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setActivePowerUps((prev) => prev.filter((p) => p.expiresAt > Date.now()));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Sorted players for leaderboard
+  const sortedPlayers = useMemo(
+    () => Object.values(players).sort((a, b) => (a.data.rank as number || 999) - (b.data.rank as number || 999)),
+    [players]
+  );
+
+  // Rank 1 player (for main spot when host eliminated)
+  const rank1Player = activePlayers.find((p) => p.data.rank === 1);
 
   return (
     <div className="flex flex-col h-[calc(100vh-64px)]">
@@ -623,8 +724,11 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
           </div>
           <div className="flex items-center gap-1.5 text-xs text-text-secondary">
             <Users size={14} />
-            {nonHostActive.length + 1} remaining
+            {activePlayers.length} remaining
           </div>
+          {phase === "waiting" && (
+            <Badge variant="secondary">Waiting...</Badge>
+          )}
         </div>
         <Button
           variant="danger"
@@ -639,12 +743,18 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
       {/* Round banner */}
       <div className="bg-gradient-to-r from-primary/20 via-accent/20 to-primary/20 border-b border-border py-2 text-center shrink-0">
         <span className="text-xs uppercase font-bold tracking-widest text-text-secondary">
-          {winner ? "BATTLE COMPLETE" : nonHostActive.length <= 2 ? "FINAL ROUND" : `ROUND ${round}`}
+          {winner
+            ? "BATTLE COMPLETE"
+            : phase === "waiting"
+              ? "NEXT ROUND STARTING SOON"
+              : activePlayers.length <= 2
+                ? "FINAL ROUND"
+                : `ROUND ${round}/${maxRounds}`}
         </span>
       </div>
 
       {/* Timer */}
-      {!winner && (
+      {!winner && phase === "active" && (
         <div className="flex justify-center py-4 shrink-0">
           <div className="flex flex-col items-center">
             <Timer size={20} className={cn(timerColor, "mb-1")} />
@@ -676,59 +786,168 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
         </div>
       )}
 
-      {/* Winner celebration */}
-      {winner && (
-        <div className="flex flex-col items-center py-8 shrink-0">
-          <Crown size={48} className="text-warning mb-3" />
-          <span className="text-2xl font-black text-text">
-            {userMap.get(winner)?.displayName || winner}
-          </span>
-          <span className="text-sm text-text-secondary mt-1">Champion!</span>
+      {/* Winner celebration - Victory Lap */}
+      {winner && players[winner] && (
+        <VictoryLap
+          winner={{
+            user: {
+              id: players[winner].userId,
+              username: players[winner].displayName,
+              displayName: players[winner].displayName,
+              email: "",
+              followerCount: 0,
+              followingCount: 0,
+              isCreator: false,
+              verifiedBadge: false,
+            },
+            score: players[winner].score,
+          }}
+          loser={{
+            user: {
+              id: sortedPlayers[1]?.userId || "",
+              username: sortedPlayers[1]?.displayName || "Unknown",
+              displayName: sortedPlayers[1]?.displayName || "Unknown",
+              email: "",
+              followerCount: 0,
+              followingCount: 0,
+              isCreator: false,
+              verifiedBadge: false,
+            },
+            score: sortedPlayers[1]?.score || 0,
+          }}
+          topGifters={(gameState?.data?.topGifters as { userId: string; total: number }[] || []).map((g) => ({
+            userId: g.userId,
+            displayName: players[g.userId]?.displayName || g.userId,
+            total: g.total,
+          }))}
+          timeRemaining={gameState?.data?.victoryLapEndsAt ? Math.max(0, Math.ceil((gameState.data.victoryLapEndsAt as number - Date.now()) / 1000)) : 180}
+          onGiftWinner={() => {
+            setSelectedTier(DONATION_TIERS[DONATION_TIERS.length - 1]); // Select highest tier
+            setShowPlayerSelect(true);
+          }}
+        />
+      )}
+
+      {/* Rejoin queue button for eliminated players */}
+      {isCurrentUserEliminated && !winner && (
+        <div className="flex justify-center py-2 shrink-0">
+          <Button variant="primary" size="sm" onClick={handleRejoinQueue}>
+            Rejoin Queue
+          </Button>
         </div>
       )}
 
       {/* Main area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Participant grid */}
+        {/* Participant grid or Split-screen for 1v1 */}
         <div className="flex-1 overflow-y-auto p-4">
-          <div className={`grid ${gridCols} gap-4`}>
-            {room.participants.map((p) => {
-              const user = userMap.get(p.userId);
-              if (!user) return null;
-              const isHost = p.userId === hostId;
-              const isElim = eliminatedUsers.includes(p.userId);
-              const score = scores[p.userId] ?? 0;
+          {/* Use SplitScreenBattle for final 1v1 */}
+          {activePlayers.length === 2 && !winner ? (
+            <SplitScreenBattle
+              leftPlayer={{
+                user: {
+                  id: activePlayers[0].userId,
+                  username: activePlayers[0].displayName,
+                  displayName: activePlayers[0].displayName,
+                  email: "",
+                  followerCount: 0,
+                  followingCount: 0,
+                  isCreator: false,
+                  verifiedBadge: false,
+                },
+                score: activePlayers[0].score,
+              }}
+              rightPlayer={{
+                user: {
+                  id: activePlayers[1].userId,
+                  username: activePlayers[1].displayName,
+                  displayName: activePlayers[1].displayName,
+                  email: "",
+                  followerCount: 0,
+                  followingCount: 0,
+                  isCreator: false,
+                  verifiedBadge: false,
+                },
+                score: activePlayers[1].score,
+              }}
+              timer={timer}
+              activePowerUps={activePowerUps}
+              onGiftLeft={() => {
+                setSelectedTier(DONATION_TIERS[0]);
+                handleGiftToPlayer(activePlayers[0].userId);
+              }}
+              onGiftRight={() => {
+                setSelectedTier(DONATION_TIERS[0]);
+                handleGiftToPlayer(activePlayers[1].userId);
+              }}
+              showGiftButtons={false}
+            />
+          ) : (
+            <div className={`grid ${gridCols} gap-4`}>
+              {Object.values(players).map((p) => {
+                const isHost = p.userId === hostId;
+                const isElim = p.isEliminated;
+                const score = p.score;
+                const rank = p.data.rank as number | undefined;
 
-              return (
-                <div key={p.userId} className="relative">
-                  <ParticipantBox
-                    participant={p}
-                    user={user}
-                    score={score}
-                    isEliminated={isElim}
-                  />
-                  {/* Host crown overlay */}
-                  {isHost && (
-                    <div className="absolute top-2 left-2 z-10 flex items-center gap-1">
-                      <Crown size={16} className="text-warning" />
-                      <Badge variant="premium">Host</Badge>
-                    </div>
-                  )}
-                  {/* Score progress bar overlaid at bottom of video area */}
-                  {!isElim && (
-                    <div className="absolute bottom-[68px] left-0 right-0 px-3">
-                      <div className="w-full h-2 bg-bg-surface2/80 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-gradient-to-r from-primary to-accent rounded-full transition-all duration-700"
-                          style={{ width: `${Math.min(100, (score / maxScore) * 100)}%` }}
-                        />
+                // Build a minimal user object from player state
+                const playerUser: User = {
+                  id: p.userId,
+                  username: p.displayName,
+                  displayName: p.displayName,
+                  email: "",
+                  followerCount: 0,
+                  followingCount: 0,
+                  isCreator: false,
+                  verifiedBadge: false,
+                };
+                const participant = { userId: p.userId, role: isHost ? "host" as const : "guest" as const };
+
+                return (
+                  <div key={p.userId} className={cn("relative", isElim && "opacity-50 grayscale")}>
+                    <ParticipantBox
+                      participant={participant}
+                      user={playerUser}
+                      score={score}
+                      isEliminated={isElim}
+                    />
+                    {/* Host crown overlay */}
+                    {isHost && (
+                      <div className="absolute top-2 left-2 z-10 flex items-center gap-1">
+                        <Crown size={16} className="text-warning" />
+                        <Badge variant="premium">Host</Badge>
                       </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                    )}
+                    {/* Rank badge */}
+                    {!isElim && rank && (
+                      <div className="absolute top-2 right-2 z-10">
+                        <Badge variant={rank === 1 ? "premium" : rank <= 3 ? "success" : "secondary"}>
+                          {rank === 1 ? "1st" : rank === 2 ? "2nd" : rank === 3 ? "3rd" : `${rank}th`}
+                        </Badge>
+                      </div>
+                    )}
+                    {/* Eliminated overlay */}
+                    {isElim && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-xl">
+                        <span className="text-sm font-bold text-danger uppercase">Eliminated</span>
+                      </div>
+                    )}
+                    {/* Score progress bar */}
+                    {!isElim && (
+                      <div className="absolute bottom-[68px] left-0 right-0 px-3">
+                        <div className="w-full h-2 bg-bg-surface2/80 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-primary to-accent rounded-full transition-all duration-700"
+                            style={{ width: `${Math.min(100, (score / maxScore) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Desktop right panel */}
@@ -736,7 +955,8 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
           <Tabs
             tabs={[
               { id: "gifts", label: "Gifts" },
-              { id: "leaderboard", label: "Leaderboard" },
+              { id: "powerups", label: "Power-Ups" },
+              { id: "leaderboard", label: "Rankings" },
               { id: "chat", label: "Chat" },
             ]}
             activeTab={sideTab}
@@ -744,14 +964,58 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
           />
           <div className="flex-1 overflow-y-auto p-3">
             {sideTab === "gifts" && (
-              <GiftPanel tiers={DONATION_TIERS} onSelect={handleGiftSelect} />
+              <GiftPanel tiers={DONATION_TIERS} onSelect={handleGiftTierSelect} />
+            )}
+            {sideTab === "powerups" && (
+              <PowerUpPanel
+                userCredits={0} // TODO: Get from user state
+                activePowerUps={activePowerUps.map((p, i) => ({
+                  id: `power-${i}`,
+                  type: p.type as "BOOSTING_GLOVE" | "MAGIC_MIST" | "STUN_HAMMER" | "TIME_MAKER",
+                  userId: currentUser?.id || "",
+                  targetId: p.targetId,
+                  activatedAt: Date.now(),
+                  expiresAt: p.expiresAt,
+                }))}
+                selectableTargets={activePlayers
+                  .filter((p) => p.userId !== currentUser?.id)
+                  .map((p) => ({
+                    userId: p.userId,
+                    displayName: p.displayName,
+                  }))}
+                currentUserId={currentUser?.id}
+                onPurchase={async (type, targetId) => handlePurchasePowerUp(type, targetId)}
+              />
             )}
             {sideTab === "leaderboard" && (
-              <LeaderboardPanel scores={scores} users={users} />
+              <div className="space-y-2">
+                {sortedPlayers.map((p) => {
+                  const rank = p.data.rank as number | undefined;
+                  return (
+                    <div key={p.userId} className={cn(
+                      "flex items-center justify-between p-2 rounded-lg",
+                      p.isEliminated ? "bg-danger/10 opacity-60" : "bg-bg-surface2"
+                    )}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-text-muted w-5">
+                          {p.isEliminated ? "X" : rank || "-"}
+                        </span>
+                        <span className="text-sm font-medium text-text">
+                          {p.displayName}
+                          {p.userId === hostId && " (Host)"}
+                        </span>
+                      </div>
+                      <span className={cn("text-sm font-bold", p.isEliminated ? "text-danger" : "text-primary")}>
+                        {p.score} pts
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             )}
             {sideTab === "chat" && (
               <div className="h-full">
-                <ChatPanel messages={chatMessages} onSend={handleSendChat} users={users} />
+                <ChatPanel messages={chatMessages} onSend={handleSendChat} users={[host]} />
               </div>
             )}
           </div>
@@ -777,27 +1041,69 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
         </Button>
       </div>
 
-      {/* Mobile drawers */}
+      {/* Gift tier picker drawer */}
       <Drawer
         isOpen={showGiftPanel}
         onClose={() => setShowGiftPanel(false)}
-        title="Send a Gift"
+        title="Pick a Gift"
         side="bottom"
       >
-        <GiftPanel tiers={DONATION_TIERS} onSelect={handleGiftSelect} />
+        <GiftPanel tiers={DONATION_TIERS} onSelect={handleGiftTierSelect} />
       </Drawer>
 
+      {/* Player select drawer (step 2 of gift flow) */}
+      <Drawer
+        isOpen={showPlayerSelect}
+        onClose={() => { setShowPlayerSelect(false); setSelectedTier(null); }}
+        title={selectedTier ? `Send ${selectedTier.name} to...` : "Choose Player"}
+        side="bottom"
+      >
+        <div className="space-y-2 p-2">
+          {activePlayers
+            .filter((p) => p.userId !== currentUser?.id)
+            .map((p) => (
+              <button
+                key={p.userId}
+                disabled={giftLoading}
+                onClick={() => handleGiftToPlayer(p.userId)}
+                className={cn(
+                  "w-full flex items-center justify-between p-3 rounded-xl border border-border bg-bg-surface2 hover:bg-bg-surface3 transition-colors",
+                  giftLoading && "opacity-50 cursor-not-allowed"
+                )}
+              >
+                <div className="flex items-center gap-3">
+                  <Avatar name={p.displayName} size="sm" />
+                  <div className="text-left">
+                    <span className="text-sm font-medium text-text">{p.displayName}</span>
+                    <span className="text-xs text-text-secondary ml-2">{p.score} pts</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-xs font-bold text-primary">
+                    {p.data.rank === 1 ? "1st" : p.data.rank === 2 ? "2nd" : p.data.rank === 3 ? "3rd" : `#${p.data.rank || "-"}`}
+                  </span>
+                </div>
+              </button>
+            ))}
+          {activePlayers.filter((p) => p.userId !== currentUser?.id).length === 0 && (
+            <p className="text-sm text-text-secondary text-center py-4">No active players to gift</p>
+          )}
+        </div>
+      </Drawer>
+
+      {/* Mobile side panel drawer */}
       <Drawer
         isOpen={showSidePanel}
         onClose={() => setShowSidePanel(false)}
-        title={sideTab === "chat" ? "Chat" : sideTab === "leaderboard" ? "Leaderboard" : "Gifts"}
+        title={sideTab === "chat" ? "Chat" : sideTab === "leaderboard" ? "Rankings" : sideTab === "powerups" ? "Power-Ups" : "Gifts"}
         side="bottom"
       >
         <div className="mb-3">
           <Tabs
             tabs={[
               { id: "gifts", label: "Gifts" },
-              { id: "leaderboard", label: "Leaderboard" },
+              { id: "powerups", label: "Power-Ups" },
+              { id: "leaderboard", label: "Rankings" },
               { id: "chat", label: "Chat" },
             ]}
             activeTab={sideTab}
@@ -806,14 +1112,55 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
         </div>
         <div className="max-h-[60vh] overflow-y-auto">
           {sideTab === "gifts" && (
-            <GiftPanel tiers={DONATION_TIERS} onSelect={handleGiftSelect} />
+            <GiftPanel tiers={DONATION_TIERS} onSelect={handleGiftTierSelect} />
+          )}
+          {sideTab === "powerups" && (
+            <PowerUpPanel
+              userCredits={0} // TODO: Get from user state
+              activePowerUps={activePowerUps.map((p, i) => ({
+                id: `power-${i}`,
+                type: p.type as "BOOSTING_GLOVE" | "MAGIC_MIST" | "STUN_HAMMER" | "TIME_MAKER",
+                userId: currentUser?.id || "",
+                targetId: p.targetId,
+                activatedAt: Date.now(),
+                expiresAt: p.expiresAt,
+              }))}
+              selectableTargets={activePlayers
+                .filter((p) => p.userId !== currentUser?.id)
+                .map((p) => ({
+                  userId: p.userId,
+                  displayName: p.displayName,
+                }))}
+              currentUserId={currentUser?.id}
+              onPurchase={async (type, targetId) => handlePurchasePowerUp(type, targetId)}
+            />
           )}
           {sideTab === "leaderboard" && (
-            <LeaderboardPanel scores={scores} users={users} />
+            <div className="space-y-2">
+              {sortedPlayers.map((p) => {
+                const rank = p.data.rank as number | undefined;
+                return (
+                  <div key={p.userId} className={cn(
+                    "flex items-center justify-between p-2 rounded-lg",
+                    p.isEliminated ? "bg-danger/10 opacity-60" : "bg-bg-surface2"
+                  )}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-text-muted w-5">
+                        {p.isEliminated ? "X" : rank || "-"}
+                      </span>
+                      <span className="text-sm font-medium text-text">{p.displayName}</span>
+                    </div>
+                    <span className={cn("text-sm font-bold", p.isEliminated ? "text-danger" : "text-primary")}>
+                      {p.score} pts
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           )}
           {sideTab === "chat" && (
             <div className="h-80">
-              <ChatPanel messages={chatMessages} onSend={handleSendChat} users={users} />
+              <ChatPanel messages={chatMessages} onSend={handleSendChat} users={[host]} />
             </div>
           )}
         </div>
@@ -823,300 +1170,339 @@ function TimerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
 }
 
 /* ============================================================
-   BATTLEFIELD CANVAS (DOM-based)
+   TOWER WARS BATTLE MODE (Server-driven FFA via SSE)
    ============================================================ */
 
-interface SpawnedUnit {
-  id: string;
-  team: "A" | "B";
-  unit: TowerUnit;
+interface TWUnit {
+  id: number;
+  tierId: string;
+  iconKey: string;
+  senderId: string;
+  supportingId: string;
+  targetId: string;
+  hp: number;
+  maxHp: number;
+  damage: number;
+  speed: number;
   position: number;
 }
 
-function BattlefieldCanvas({
-  unitsA,
-  unitsB,
-  teamAHp,
-  teamBHp,
+function StarArena({
+  players,
+  units,
+  baseHp,
+  maxBaseHp,
+  supportingId,
+  attackingId,
 }: {
-  unitsA: SpawnedUnit[];
-  unitsB: SpawnedUnit[];
-  teamAHp: number;
-  teamBHp: number;
+  players: Record<string, { userId: string; displayName: string; isEliminated: boolean; score: number }>;
+  units: TWUnit[];
+  baseHp: Record<string, number>;
+  maxBaseHp: number;
+  supportingId: string | null;
+  attackingId: string | null;
 }) {
+  const playerIds = Object.keys(players);
+  const count = playerIds.length;
+
+  const getPos = (index: number) => {
+    const angle = (index / count) * 2 * Math.PI - Math.PI / 2;
+    return {
+      x: 50 + 40 * Math.cos(angle),
+      y: 50 + 40 * Math.sin(angle),
+    };
+  };
+
+  // Map unit position (0-100) to screen coordinates between source and target via center
+  const getUnitXY = (unit: TWUnit) => {
+    const srcIdx = playerIds.indexOf(unit.supportingId);
+    const tgtIdx = playerIds.indexOf(unit.targetId);
+    if (srcIdx < 0 || tgtIdx < 0) return { x: 50, y: 50 };
+
+    const src = getPos(srcIdx);
+    const tgt = getPos(tgtIdx);
+    const center = { x: 50, y: 50 };
+    const pos = unit.position / 100;
+
+    if (pos <= 0.5) {
+      // Source -> Center (0 to 0.5 mapped to src->center)
+      const t = pos * 2;
+      return { x: src.x + (center.x - src.x) * t, y: src.y + (center.y - src.y) * t };
+    } else {
+      // Center -> Target (0.5 to 1.0 mapped to center->target)
+      const t = (pos - 0.5) * 2;
+      return { x: center.x + (tgt.x - center.x) * t, y: center.y + (tgt.y - center.y) * t };
+    }
+  };
+
   return (
-    <div className="relative h-48 bg-bg-surface rounded-xl overflow-hidden border border-border">
-      {/* Lane lines */}
-      <div className="absolute inset-x-20 top-1/2 h-px bg-border/30" />
-      <div className="absolute inset-x-20 top-[35%] h-px bg-border/10" />
-      <div className="absolute inset-x-20 top-[65%] h-px bg-border/10" />
+    <div className="relative w-full h-56 sm:h-64 bg-bg-surface rounded-xl overflow-hidden border border-border">
+      {/* Center ring */}
+      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 rounded-full border-2 border-border/40 bg-bg-surface2/30" />
 
-      {/* Team A Base */}
-      <div className="absolute left-2 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1 z-10">
-        <div className="w-12 h-16 bg-primary/30 rounded border-2 border-primary flex items-center justify-center">
-          <Shield className="w-6 h-6 text-primary" />
-        </div>
-        <div className="w-16 h-2 bg-bg-surface2 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-primary rounded-full transition-all duration-500"
-            style={{ width: `${teamAHp}%` }}
-          />
-        </div>
-        <span className="text-[10px] font-bold text-primary">{teamAHp}%</span>
-      </div>
+      {/* Connection lines from each base to center */}
+      <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {playerIds.map((id, i) => {
+          const pos = getPos(i);
+          return (
+            <line
+              key={id}
+              x1={pos.x}
+              y1={pos.y}
+              x2={50}
+              y2={50}
+              stroke="currentColor"
+              className="text-border/20"
+              strokeWidth="0.3"
+            />
+          );
+        })}
+      </svg>
 
-      {/* Marching units */}
-      <div className="absolute inset-x-20 top-0 bottom-0">
-        {unitsA.map((u) => (
+      {/* Player bases */}
+      {playerIds.map((id, i) => {
+        const pos = getPos(i);
+        const player = players[id];
+        const hp = baseHp[id] ?? 0;
+        const hpPct = maxBaseHp > 0 ? Math.max(0, (hp / maxBaseHp) * 100) : 0;
+        const hpColor = hpPct > 60 ? "bg-success" : hpPct > 30 ? "bg-warning" : "bg-danger";
+        const isSupport = id === supportingId;
+        const isAttack = id === attackingId;
+
+        return (
           <div
-            key={u.id}
-            className="absolute transition-all duration-1000 ease-linear"
-            style={{ left: `${u.position}%`, top: "35%" }}
+            key={id}
+            className="absolute -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
           >
-            <span className="text-2xl drop-shadow-lg">{getUnitEmoji(u.unit.type)}</span>
+            <div
+              className={cn(
+                "flex flex-col items-center gap-0.5 p-1 rounded-lg border transition-all",
+                player.isEliminated
+                  ? "opacity-40 grayscale border-border"
+                  : isSupport
+                    ? "border-success bg-success/10 shadow-sm shadow-success/20"
+                    : isAttack
+                      ? "border-danger bg-danger/10 shadow-sm shadow-danger/20"
+                      : "border-border/50 bg-bg-surface2/60"
+              )}
+            >
+              <span className="text-[10px] font-semibold text-text truncate max-w-[60px]">
+                {player.displayName}
+              </span>
+              {!player.isEliminated && (
+                <div className="w-12 h-1.5 bg-bg-surface2 rounded-full overflow-hidden">
+                  <div
+                    className={cn("h-full rounded-full transition-all duration-300", hpColor)}
+                    style={{ width: `${hpPct}%` }}
+                  />
+                </div>
+              )}
+              {player.isEliminated && (
+                <span className="text-[8px] font-bold text-danger uppercase">OUT</span>
+              )}
+            </div>
           </div>
-        ))}
-        {unitsB.map((u) => (
+        );
+      })}
+
+      {/* Units traveling */}
+      {units.map((unit) => {
+        const xy = getUnitXY(unit);
+        const inCombatZone = unit.position >= 40 && unit.position <= 60;
+        return (
           <div
-            key={u.id}
-            className="absolute transition-all duration-1000 ease-linear"
-            style={{ right: `${u.position}%`, top: "55%" }}
+            key={unit.id}
+            className={cn(
+              "absolute -translate-x-1/2 -translate-y-1/2 transition-all duration-200 ease-linear",
+              inCombatZone && "animate-pulse"
+            )}
+            style={{ left: `${xy.x}%`, top: `${xy.y}%` }}
           >
-            <span className="text-2xl drop-shadow-lg">{getUnitEmoji(u.unit.type)}</span>
+            <span className="text-lg drop-shadow-md">{unit.iconKey}</span>
           </div>
-        ))}
-      </div>
+        );
+      })}
 
-      {/* Team B Base */}
-      <div className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1 z-10">
-        <div className="w-12 h-16 bg-accent/30 rounded border-2 border-accent flex items-center justify-center">
-          <Shield className="w-6 h-6 text-accent" />
-        </div>
-        <div className="w-16 h-2 bg-bg-surface2 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-accent rounded-full transition-all duration-500"
-            style={{ width: `${teamBHp}%` }}
-          />
-        </div>
-        <span className="text-[10px] font-bold text-accent">{teamBHp}%</span>
-      </div>
-
-      {/* Labels */}
-      <div className="absolute top-1 left-2 text-[10px] font-semibold text-primary uppercase tracking-wider">
-        Team A
-      </div>
-      <div className="absolute top-1 right-2 text-[10px] font-semibold text-accent uppercase tracking-wider">
-        Team B
+      {/* Center label */}
+      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+        <Swords size={14} className="text-text-muted/40" />
       </div>
     </div>
   );
 }
-
-/* ============================================================
-   UNIT SHOP CARD
-   ============================================================ */
-
-function UnitShopCard({
-  unit,
-  onBuy,
-}: {
-  unit: TowerUnit;
-  onBuy: (unit: TowerUnit) => void;
-}) {
-  const [showTooltip, setShowTooltip] = useState(false);
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => onBuy(unit)}
-        onMouseEnter={() => setShowTooltip(true)}
-        onMouseLeave={() => setShowTooltip(false)}
-        className="
-          w-full flex flex-col items-center gap-1.5 p-3
-          bg-bg-surface2 rounded-xl border border-transparent
-          hover:border-primary hover:bg-bg-surface3
-          transition-all duration-200 active:scale-95
-        "
-      >
-        <span className="text-3xl">{getUnitEmoji(unit.type)}</span>
-        <span className="text-xs font-medium text-text truncate w-full text-center">
-          {unit.name}
-        </span>
-        <span className="text-[10px] font-semibold text-accent">
-          {formatCurrency(unit.costCents)}
-        </span>
-        <div className="flex gap-1 text-[9px] text-text-muted">
-          <span>HP:{unit.hp}</span>
-          <span>DMG:{unit.damage}</span>
-        </div>
-      </button>
-      {/* Tooltip */}
-      {showTooltip && (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 w-44 p-2 bg-bg-surface3 border border-border rounded-lg shadow-lg text-xs">
-          <p className="font-semibold text-text mb-1">{unit.name}</p>
-          <p className="text-text-muted mb-1">
-            Type: <span className="text-text-secondary capitalize">{unit.type.replace("_", " ")}</span>
-          </p>
-          <p className="text-text-muted mb-1">
-            Speed: {unit.speed} | HP: {unit.hp} | DMG: {unit.damage}
-          </p>
-          {unit.counters.length > 0 && (
-            <p className="text-success">
-              Counters: {unit.counters.map((c) => c.replace("_", " ")).join(", ")}
-            </p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ============================================================
-   TOWER WARS BATTLE MODE
-   ============================================================ */
 
 function TowerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
   const router = useRouter();
-  const users = [host] as User[];
-  const userMap = useMemo(() => {
-    const map = new Map<string, User>();
-    map.set(host.id, host);
-    return map;
-  }, [host]);
+  const { gameState, setGameState, setConnected } = useGameStore();
+  const { currentUser } = useAuthStore();
+  const sseRef = useRef<SSEClient | null>(null);
 
-  const [teamAHealth, setTeamAHealth] = useState(100);
-  const [teamBHealth, setTeamBHealth] = useState(100);
-  const [spawnedUnits, setSpawnedUnits] = useState<SpawnedUnit[]>([]);
-  const [showShopDrawer, setShowShopDrawer] = useState(false);
-  const [shopCategory, setShopCategory] = useState("all");
-  const [winner, setWinner] = useState<"A" | "B" | null>(null);
-  const [scores, setScores] = useState<Record<string, number>>({});
+  // Persistent targeting
+  const [supportingId, setSupportingId] = useState<string | null>(null);
+  const [attackingId, setAttackingId] = useState<string | null>(null);
+  const [showSupportPicker, setShowSupportPicker] = useState(false);
+  const [showAttackPicker, setShowAttackPicker] = useState(false);
+  const [showGiftPanel, setShowGiftPanel] = useState(false);
+  const [giftLoading, setGiftLoading] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
+  const [sideTab, setSideTab] = useState("gifts");
+  const [showSidePanel, setShowSidePanel] = useState(false);
   const [chatMessages, setChatMessages] = useState<
     { id: string; userId: string; text: string; timestamp: number }[]
-  >([
-    { id: "tw-1", userId: "system", text: "Tower Wars begin!", timestamp: Date.now() - 5000 },
-  ]);
-  const [sideTab, setSideTab] = useState("shop");
-  const unitIdCounter = useRef(0);
+  >([]);
+  const prevEliminatedRef = useRef<Set<string>>(new Set());
+  const prevWinnerRef = useRef<string | null>(null);
 
-  // Determine teams
-  const teamA = useMemo(
-    () => room.participants.filter((p) => p.userId === room.hostId),
-    [room]
-  );
-  const teamB = useMemo(
-    () => room.participants.filter((p) => p.userId !== room.hostId),
-    [room]
-  );
-
-  const unitsA = useMemo(
-    () => spawnedUnits.filter((u) => u.team === "A"),
-    [spawnedUnits]
-  );
-  const unitsB = useMemo(
-    () => spawnedUnits.filter((u) => u.team === "B"),
-    [spawnedUnits]
-  );
-
-  // Filtered shop units
-  const filteredUnits = useMemo(
-    () =>
-      shopCategory === "all"
-        ? TOWER_UNITS
-        : TOWER_UNITS.filter((u) => u.type === shopCategory),
-    [shopCategory]
-  );
-
-  const addChat = useCallback((userId: string, text: string) => {
-    setChatMessages((prev) => [
-      ...prev,
-      { id: `msg-${Date.now()}-${Math.random()}`, userId, text, timestamp: Date.now() },
-    ]);
-  }, []);
-
-  // Spawn a unit
-  const spawnUnit = useCallback(
-    (team: "A" | "B", unit: TowerUnit) => {
-      const id = `unit-${++unitIdCounter.current}`;
-      setSpawnedUnits((prev) => [...prev, { id, team, unit, position: 0 }]);
-      addChat("system", `Team ${team} spawned a ${unit.name}!`);
-    },
-    [addChat]
-  );
-
-  const handleBuyUnit = useCallback(
-    (unit: TowerUnit) => {
-      // Alternate: user purchases for Team A (simulated)
-      spawnUnit("A", unit);
-      setShowShopDrawer(false);
-    },
-    [spawnUnit, setShowShopDrawer]
-  );
-
-  // Auto-simulate: move units, check collisions, damage bases
+  // SSE connection
   useEffect(() => {
-    if (winner) return;
-
-    const interval = setInterval(() => {
-      setSpawnedUnits((prev) => {
-        let updated = prev.map((u) => ({
-          ...u,
-          position: u.position + u.unit.speed * 2,
-        }));
-
-        // Check A units reaching B base (position > 90)
-        const aReached = updated.filter((u) => u.team === "A" && u.position >= 90);
-        const bReached = updated.filter((u) => u.team === "B" && u.position >= 90);
-
-        if (aReached.length > 0) {
-          const totalDmg = aReached.reduce((sum, u) => sum + u.unit.damage / 10, 0);
-          setTeamBHealth((hp) => Math.max(0, Math.round(hp - totalDmg)));
-        }
-        if (bReached.length > 0) {
-          const totalDmg = bReached.reduce((sum, u) => sum + u.unit.damage / 10, 0);
-          setTeamAHealth((hp) => Math.max(0, Math.round(hp - totalDmg)));
-        }
-
-        // Remove units that passed through
-        updated = updated.filter((u) => u.position < 95);
-
-        // Simple collision: if A unit and B unit overlap (positions sum > 85), check counter
-        const aUnits = updated.filter((u) => u.team === "A");
-        const bUnits = updated.filter((u) => u.team === "B");
-        const toRemove = new Set<string>();
-
-        for (const a of aUnits) {
-          for (const b of bUnits) {
-            if (a.position + b.position > 80 && !toRemove.has(a.id) && !toRemove.has(b.id)) {
-              // Check if A counters B
-              if (a.unit.counters.includes(b.unit.type)) {
-                toRemove.add(b.id);
-              } else if (b.unit.counters.includes(a.unit.type)) {
-                toRemove.add(a.id);
-              } else {
-                // Both destroyed on collision
-                toRemove.add(a.id);
-                toRemove.add(b.id);
-              }
-            }
+    if (!currentUser) return;
+    const sse = new SSEClient({
+      url: `/api/live/${room.id}/game/state?userId=${currentUser.id}`,
+      onMessage: (event, data) => {
+        if (event === "game-state") setGameState(data as GameState);
+        if (event === "game-event") {
+          const evt = data as { event: string; data: Record<string, unknown> };
+          if (evt.event === "gift") {
+            const d = evt.data;
+            const unitType = d.unitType as string;
+            const msg = unitType === "heal"
+              ? `${d.senderName} healed with ${d.tierIcon} ${d.tierName}!`
+              : `${d.senderName} sent ${d.tierIcon} ${d.tierName} to attack!`;
+            setChatMessages((prev) => [
+              ...prev,
+              { id: `gift-${Date.now()}-${Math.random()}`, userId: "system", text: msg, timestamp: Date.now() },
+            ]);
           }
         }
+      },
+      onOpen: () => setConnected(true),
+      onClose: () => setConnected(false),
+    });
+    sse.connect();
+    sseRef.current = sse;
+    return () => sse.disconnect();
+  }, [room.id, currentUser?.id, setGameState, setConnected]);
 
-        return updated.filter((u) => !toRemove.has(u.id));
-      });
-    }, 500);
+  // Derive state from gameState
+  const players = gameState?.players || {};
+  const activePlayers = useMemo(
+    () => Object.values(players).filter((p) => !p.isEliminated),
+    [players]
+  );
+  const units = (gameState?.data?.units as TWUnit[]) || [];
+  const baseHp = (gameState?.data?.baseHp as Record<string, number>) || {};
+  const maxBaseHp = (gameState?.data?.maxBaseHp as number) || 1000;
+  const winner = gameState?.winner || null;
+  const phase = gameState?.phase || "waiting";
 
-    return () => clearInterval(interval);
-  }, [winner]);
+  const showBannerMsg = useCallback((text: string, durationMs = 3000) => {
+    setBanner(text);
+    setTimeout(() => setBanner(null), durationMs);
+  }, []);
 
-  // Check win condition
+  // Show banners for eliminations / winner
   useEffect(() => {
-    if (teamAHealth <= 0 && !winner) {
-      setWinner("B");
-    } else if (teamBHealth <= 0 && !winner) {
-      setWinner("A");
+    if (!gameState) return;
+    const currentEliminated = new Set(
+      Object.keys(players).filter((id) => players[id].isEliminated)
+    );
+    for (const id of currentEliminated) {
+      if (!prevEliminatedRef.current.has(id)) {
+        const name = players[id]?.displayName || id;
+        showBannerMsg(`ELIMINATED: ${name}`, 3000);
+        setChatMessages((prev) => [
+          ...prev,
+          { id: `elim-${Date.now()}`, userId: "system", text: `${name} has been eliminated!`, timestamp: Date.now() },
+        ]);
+      }
     }
-  }, [teamAHealth, teamBHealth, winner]);
+    prevEliminatedRef.current = currentEliminated;
+
+    if (winner && winner !== prevWinnerRef.current) {
+      const winnerName = players[winner]?.displayName || winner;
+      showBannerMsg(`WINNER: ${winnerName}!`, 10000);
+    }
+    prevWinnerRef.current = winner;
+  }, [gameState, players, winner, showBannerMsg]);
+
+  // Auto-select targets: default support to self if player, attack to first other player
+  useEffect(() => {
+    if (!currentUser || Object.keys(players).length === 0) return;
+    if (!supportingId && players[currentUser.id]) {
+      setSupportingId(currentUser.id);
+    }
+    if (!attackingId) {
+      const firstOther = activePlayers.find((p) => p.userId !== (supportingId || currentUser.id));
+      if (firstOther) setAttackingId(firstOther.userId);
+    }
+  }, [currentUser, players, activePlayers, supportingId, attackingId]);
+
+  // Clear targets if targeted player gets eliminated
+  useEffect(() => {
+    if (supportingId && players[supportingId]?.isEliminated) {
+      setSupportingId(null);
+    }
+    if (attackingId && players[attackingId]?.isEliminated) {
+      setAttackingId(null);
+    }
+  }, [players, supportingId, attackingId]);
+
+  const gridCols = useMemo(() => {
+    const count = Object.keys(players).length;
+    if (count <= 2) return "grid-cols-2";
+    if (count <= 4) return "grid-cols-2 sm:grid-cols-4";
+    if (count <= 6) return "grid-cols-3 sm:grid-cols-3 lg:grid-cols-6";
+    return "grid-cols-4 lg:grid-cols-4";
+  }, [Object.keys(players).length]);
+
+  // Gift handler — send a donation tier
+  const handleGiftSelect = useCallback(async (tier: DonationTier) => {
+    if (giftLoading || !supportingId || !attackingId) return;
+    if (phase !== "active") {
+      showBannerMsg("Game not active", 2000);
+      return;
+    }
+
+    const stats = TOWER_WARS_STATS[tier.id];
+    if (!stats) return;
+
+    // For heal tiers: target is the supported player
+    const targetUserId = stats.type === "heal" ? supportingId : attackingId;
+
+    setGiftLoading(true);
+    try {
+      const res = await fetch(`/api/live/${room.id}/game/gift`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          targetUserId,
+          supportingId,
+          tierId: tier.id,
+          amount: tier.valueCents,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        showBannerMsg(data.error || "Gift failed", 2000);
+      }
+    } catch {
+      showBannerMsg("Gift failed", 2000);
+    } finally {
+      setGiftLoading(false);
+    }
+  }, [giftLoading, supportingId, attackingId, phase, room.id, showBannerMsg]);
+
+  const handleSendChat = useCallback(
+    (text: string) => {
+      setChatMessages((prev) => [
+        ...prev,
+        { id: `msg-${Date.now()}-${Math.random()}`, userId: currentUser?.id || "anon", text, timestamp: Date.now() },
+      ]);
+    },
+    [currentUser?.id]
+  );
 
   const handleShare = useCallback(() => {
     if (navigator.share) {
@@ -1126,33 +1512,30 @@ function TowerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
     }
   }, [room.title]);
 
+  // Gift tiers with heal badges
+  const giftTiers = useMemo(() => REAL_DONATION_TIERS, []);
+
+  const supportPlayer = supportingId ? players[supportingId] : null;
+  const attackPlayer = attackingId ? players[attackingId] : null;
+
   return (
     <div className="flex flex-col h-[calc(100vh-64px)]">
-      {/* Top scoreboard */}
-      <div className="flex items-center justify-between px-4 py-3 bg-bg-surface border-b border-border shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-primary" />
-          <span className="text-sm font-bold text-primary">TEAM A</span>
-          <span className="text-lg font-mono font-bold text-text">{teamAHealth}%</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Swords size={18} className="text-text-muted" />
-          <span className="text-xs text-text-muted uppercase font-bold tracking-wider">VS</span>
-          <Swords size={18} className="text-text-muted" />
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-lg font-mono font-bold text-text">{teamBHealth}%</span>
-          <span className="text-sm font-bold text-accent">TEAM B</span>
-          <div className="w-3 h-3 rounded-full bg-accent" />
-        </div>
-      </div>
-
-      {/* Header bar */}
+      {/* Top bar */}
       <div className="flex items-center justify-between px-4 py-2 bg-bg-surface border-b border-border shrink-0">
-        <h1 className="text-xs font-semibold text-text truncate max-w-[40%]">{room.title}</h1>
-        <div className="flex items-center gap-2 text-xs text-text-secondary">
-          <Eye size={12} />
-          {formatViewers(room.viewerCount)}
+        <div className="flex items-center gap-2">
+          <Swords size={16} className="text-primary" />
+          <h1 className="text-sm font-semibold text-text truncate max-w-[30%]">{room.title}</h1>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 text-xs text-text-secondary">
+            <Eye size={14} />
+            {formatViewers(room.viewerCount)}
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-text-secondary">
+            <Users size={14} />
+            {activePlayers.length} alive
+          </div>
+          {phase === "waiting" && <Badge variant="secondary">Waiting...</Badge>}
         </div>
         <Button
           variant="danger"
@@ -1164,124 +1547,176 @@ function TowerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
         </Button>
       </div>
 
-      {/* Winner banner */}
-      {winner && (
-        <div className="bg-gradient-to-r from-warning/20 to-success/20 py-4 text-center shrink-0">
-          <Crown size={32} className="text-warning mx-auto mb-2" />
-          <span className="text-xl font-black text-text">
-            TEAM {winner} WINS!
-          </span>
+      {/* Banner overlay */}
+      {banner && (
+        <div className="fixed inset-x-0 top-1/3 z-50 flex justify-center pointer-events-none">
+          <div
+            className={cn(
+              "px-8 py-4 rounded-2xl text-white text-xl sm:text-2xl font-black tracking-wider uppercase animate-pulse",
+              banner.includes("WINNER")
+                ? "bg-gradient-to-r from-warning to-success shadow-lg shadow-success/40"
+                : banner.includes("ELIMINATED")
+                  ? "bg-danger/90 shadow-lg shadow-danger/40"
+                  : "bg-gradient-to-r from-primary to-accent shadow-lg shadow-primary/40"
+            )}
+          >
+            {banner}
+          </div>
         </div>
       )}
 
-      {/* Main content */}
+      {/* Winner celebration */}
+      {winner && (
+        <div className="flex flex-col items-center py-6 shrink-0">
+          <Crown size={48} className="text-warning mb-3" />
+          <span className="text-2xl font-black text-text">
+            {players[winner]?.displayName || winner}
+          </span>
+          <span className="text-sm text-text-secondary mt-1">Tower Wars Champion!</span>
+        </div>
+      )}
+
+      {/* Main area */}
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 flex flex-col overflow-y-auto p-4 gap-4">
-          {/* Participants */}
-          <div className="grid grid-cols-2 gap-4">
-            {/* Team A */}
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2 h-2 rounded-full bg-primary" />
-                <span className="text-xs font-bold text-primary uppercase">Team A</span>
-              </div>
-              {teamA.map((p) => {
-                const user = userMap.get(p.userId);
-                if (!user) return null;
-                return (
-                  <ParticipantBox
-                    key={p.userId}
-                    participant={p}
-                    user={user}
-                    score={scores[p.userId] ?? 0}
-                  />
-                );
-              })}
-            </div>
-            {/* Team B */}
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2 h-2 rounded-full bg-accent" />
-                <span className="text-xs font-bold text-accent uppercase">Team B</span>
-              </div>
-              {teamB.map((p) => {
-                const user = userMap.get(p.userId);
-                if (!user) return null;
-                return (
-                  <ParticipantBox
-                    key={p.userId}
-                    participant={p}
-                    user={user}
-                    score={scores[p.userId] ?? 0}
-                  />
-                );
-              })}
-            </div>
+          {/* Player HP grid */}
+          <div className={cn("grid gap-3", gridCols)}>
+            {Object.values(players).map((p) => {
+              const hp = baseHp[p.userId] ?? 0;
+              const hpPct = maxBaseHp > 0 ? Math.max(0, (hp / maxBaseHp) * 100) : 0;
+              const hpColor = hpPct > 60 ? "bg-success" : hpPct > 30 ? "bg-warning" : "bg-danger";
+              const isSupport = p.userId === supportingId;
+              const isAttack = p.userId === attackingId;
+
+              return (
+                <div
+                  key={p.userId}
+                  className={cn(
+                    "relative p-3 rounded-xl border transition-all",
+                    p.isEliminated
+                      ? "opacity-40 grayscale border-border bg-bg-surface"
+                      : isSupport
+                        ? "border-success bg-success/5"
+                        : isAttack
+                          ? "border-danger bg-danger/5"
+                          : "border-border bg-bg-surface"
+                  )}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <Avatar name={p.displayName} size="sm" />
+                    <div className="flex-1 min-w-0">
+                      <span className="text-xs font-semibold text-text truncate block">{p.displayName}</span>
+                      <span className="text-[10px] text-text-muted">{p.score} pts</span>
+                    </div>
+                    {isSupport && <Badge variant="success">ALLY</Badge>}
+                    {isAttack && <Badge variant="danger">TARGET</Badge>}
+                  </div>
+                  {!p.isEliminated && (
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-text-muted">HP</span>
+                        <span className="font-mono font-bold text-text">{Math.ceil(hp)}/{maxBaseHp}</span>
+                      </div>
+                      <div className="w-full h-2.5 bg-bg-surface2 rounded-full overflow-hidden">
+                        <div
+                          className={cn("h-full rounded-full transition-all duration-300", hpColor)}
+                          style={{ width: `${hpPct}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {p.isEliminated && (
+                    <div className="text-center py-1">
+                      <span className="text-xs font-bold text-danger uppercase">Eliminated</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
-          {/* Battlefield */}
+          {/* Star Arena */}
           <div>
             <div className="flex items-center gap-2 mb-2">
-              <Swords size={14} className="text-text-muted" />
+              <Target size={14} className="text-text-muted" />
               <span className="text-xs font-bold text-text-secondary uppercase tracking-wider">
-                Battlefield
+                Arena
+              </span>
+              <span className="text-[10px] text-text-muted">
+                {units.length} unit{units.length !== 1 ? "s" : ""} active
               </span>
             </div>
-            <BattlefieldCanvas
-              unitsA={unitsA}
-              unitsB={unitsB}
-              teamAHp={teamAHealth}
-              teamBHp={teamBHealth}
+            <StarArena
+              players={players}
+              units={units}
+              baseHp={baseHp}
+              maxBaseHp={maxBaseHp}
+              supportingId={supportingId}
+              attackingId={attackingId}
             />
           </div>
         </div>
 
-        {/* Desktop right panel: unit shop + chat */}
+        {/* Desktop right panel */}
         <div className="hidden lg:flex flex-col w-80 border-l border-border bg-bg-surface shrink-0">
           <Tabs
             tabs={[
-              { id: "shop", label: "Unit Shop" },
+              { id: "gifts", label: "Gifts" },
               { id: "chat", label: "Chat" },
             ]}
             activeTab={sideTab}
             onChange={setSideTab}
           />
-          {sideTab === "shop" ? (
-            <div className="flex-1 overflow-y-auto">
-              {/* Category filter */}
-              <div className="flex gap-1 px-3 py-2 overflow-x-auto no-scrollbar">
-                {unitCategoryTabs.map((cat) => (
-                  <button
-                    key={cat.id}
-                    onClick={() => setShopCategory(cat.id)}
-                    className={cn(
-                      "px-2.5 py-1 text-[10px] font-semibold rounded-full whitespace-nowrap transition-colors",
-                      shopCategory === cat.id
-                        ? "bg-primary text-white"
-                        : "bg-bg-surface2 text-text-muted hover:text-text-secondary"
-                    )}
-                  >
-                    {cat.label}
-                  </button>
-                ))}
+          <div className="flex-1 overflow-y-auto p-3">
+            {sideTab === "gifts" && (
+              <div>
+                <GiftPanel tiers={giftTiers} onSelect={handleGiftSelect} />
+                {/* Heal badge overlay info */}
+                <div className="mt-2 p-2 rounded-lg bg-bg-surface2 text-[10px] text-text-muted">
+                  Star, Bolt, Diamond = instant heal. Others = attack units.
+                </div>
               </div>
-              {/* Unit grid */}
-              <div className="grid grid-cols-2 gap-2 p-3">
-                {filteredUnits.map((unit) => (
-                  <UnitShopCard key={unit.unitId} unit={unit} onBuy={handleBuyUnit} />
-                ))}
+            )}
+            {sideTab === "chat" && (
+              <div className="h-full">
+                <ChatPanel messages={chatMessages} onSend={handleSendChat} users={[host]} />
               </div>
-            </div>
-          ) : (
-            <div className="flex-1 overflow-hidden">
-              <ChatPanel
-                messages={chatMessages}
-                onSend={(text) => addChat("system", text)}
-                users={users}
-              />
-            </div>
-          )}
+            )}
+          </div>
         </div>
+      </div>
+
+      {/* Target selection bar */}
+      <div className="flex items-center gap-2 px-4 py-2 bg-bg-surface2 border-t border-border shrink-0">
+        <button
+          onClick={() => setShowSupportPicker(true)}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors",
+            supportPlayer
+              ? "border-success bg-success/10 text-success"
+              : "border-border bg-bg-surface text-text-muted"
+          )}
+        >
+          <Shield size={12} />
+          {supportPlayer ? supportPlayer.displayName : "Pick Ally"}
+        </button>
+        <Swords size={14} className="text-text-muted shrink-0" />
+        <button
+          onClick={() => setShowAttackPicker(true)}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors",
+            attackPlayer
+              ? "border-danger bg-danger/10 text-danger"
+              : "border-border bg-bg-surface text-text-muted"
+          )}
+        >
+          <Target size={12} />
+          {attackPlayer ? attackPlayer.displayName : "Pick Target"}
+        </button>
+        <div className="flex-1" />
+        {supportingId && attackingId && phase === "active" && (
+          <Badge variant="success">Ready</Badge>
+        )}
       </div>
 
       {/* Bottom bar */}
@@ -1290,44 +1725,146 @@ function TowerWarsBattle({ room, host }: { room: LiveRoom; host: User }) {
           variant="ghost"
           size="sm"
           className="lg:hidden"
-          icon={<ShoppingCart size={14} />}
-          onClick={() => setShowShopDrawer(true)}
+          onClick={() => {
+            setSideTab("chat");
+            setShowSidePanel(true);
+          }}
         >
-          Shop
+          Chat
         </Button>
-        <DonateButton onClick={() => setShowShopDrawer(true)} />
+        <DonateButton onClick={() => setShowGiftPanel(true)} />
         <Button variant="ghost" size="sm" icon={<Share2 size={14} />} onClick={handleShare}>
           Share
         </Button>
       </div>
 
-      {/* Mobile shop drawer */}
+      {/* Gift tier picker drawer */}
       <Drawer
-        isOpen={showShopDrawer}
-        onClose={() => setShowShopDrawer(false)}
-        title="Unit Shop"
+        isOpen={showGiftPanel}
+        onClose={() => setShowGiftPanel(false)}
+        title={
+          supportingId && attackingId
+            ? `Send Gift (${supportPlayer?.displayName} vs ${attackPlayer?.displayName})`
+            : "Pick targets first"
+        }
         side="bottom"
       >
-        <div className="flex gap-1.5 mb-3 overflow-x-auto no-scrollbar">
-          {unitCategoryTabs.map((cat) => (
+        {supportingId && attackingId ? (
+          <GiftPanel tiers={giftTiers} onSelect={handleGiftSelect} />
+        ) : (
+          <p className="text-sm text-text-secondary text-center py-4">
+            Select an ally and a target before sending gifts.
+          </p>
+        )}
+      </Drawer>
+
+      {/* Support player picker */}
+      <Drawer
+        isOpen={showSupportPicker}
+        onClose={() => setShowSupportPicker(false)}
+        title="Support Who?"
+        side="bottom"
+      >
+        <div className="space-y-2 p-2">
+          {activePlayers.map((p) => (
             <button
-              key={cat.id}
-              onClick={() => setShopCategory(cat.id)}
+              key={p.userId}
+              onClick={() => {
+                setSupportingId(p.userId);
+                // If attacking same player, clear attack target
+                if (attackingId === p.userId) setAttackingId(null);
+                setShowSupportPicker(false);
+              }}
               className={cn(
-                "px-3 py-1.5 text-xs font-semibold rounded-full whitespace-nowrap transition-colors",
-                shopCategory === cat.id
-                  ? "bg-primary text-white"
-                  : "bg-bg-surface2 text-text-muted hover:text-text-secondary"
+                "w-full flex items-center justify-between p-3 rounded-xl border transition-colors",
+                p.userId === supportingId
+                  ? "border-success bg-success/10"
+                  : "border-border bg-bg-surface2 hover:bg-bg-surface3"
               )}
             >
-              {cat.label}
+              <div className="flex items-center gap-3">
+                <Avatar name={p.displayName} size="sm" />
+                <span className="text-sm font-medium text-text">{p.displayName}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-text-muted">
+                  {Math.ceil(baseHp[p.userId] ?? 0)} HP
+                </span>
+                {p.userId === supportingId && <Badge variant="success">Current</Badge>}
+              </div>
             </button>
           ))}
         </div>
-        <div className="grid grid-cols-3 gap-2">
-          {filteredUnits.map((unit) => (
-            <UnitShopCard key={unit.unitId} unit={unit} onBuy={handleBuyUnit} />
-          ))}
+      </Drawer>
+
+      {/* Attack target picker */}
+      <Drawer
+        isOpen={showAttackPicker}
+        onClose={() => setShowAttackPicker(false)}
+        title="Attack Who?"
+        side="bottom"
+      >
+        <div className="space-y-2 p-2">
+          {activePlayers
+            .filter((p) => p.userId !== supportingId)
+            .map((p) => (
+              <button
+                key={p.userId}
+                onClick={() => {
+                  setAttackingId(p.userId);
+                  setShowAttackPicker(false);
+                }}
+                className={cn(
+                  "w-full flex items-center justify-between p-3 rounded-xl border transition-colors",
+                  p.userId === attackingId
+                    ? "border-danger bg-danger/10"
+                    : "border-border bg-bg-surface2 hover:bg-bg-surface3"
+                )}
+              >
+                <div className="flex items-center gap-3">
+                  <Avatar name={p.displayName} size="sm" />
+                  <span className="text-sm font-medium text-text">{p.displayName}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-text-muted">
+                    {Math.ceil(baseHp[p.userId] ?? 0)} HP
+                  </span>
+                  {p.userId === attackingId && <Badge variant="danger">Current</Badge>}
+                </div>
+              </button>
+            ))}
+          {activePlayers.filter((p) => p.userId !== supportingId).length === 0 && (
+            <p className="text-sm text-text-secondary text-center py-4">No targets available</p>
+          )}
+        </div>
+      </Drawer>
+
+      {/* Mobile side panel drawer */}
+      <Drawer
+        isOpen={showSidePanel}
+        onClose={() => setShowSidePanel(false)}
+        title={sideTab === "chat" ? "Chat" : "Gifts"}
+        side="bottom"
+      >
+        <div className="mb-3">
+          <Tabs
+            tabs={[
+              { id: "gifts", label: "Gifts" },
+              { id: "chat", label: "Chat" },
+            ]}
+            activeTab={sideTab}
+            onChange={setSideTab}
+          />
+        </div>
+        <div className="max-h-[60vh] overflow-y-auto">
+          {sideTab === "gifts" && (
+            <GiftPanel tiers={giftTiers} onSelect={handleGiftSelect} />
+          )}
+          {sideTab === "chat" && (
+            <div className="h-80">
+              <ChatPanel messages={chatMessages} onSend={handleSendChat} users={[host]} />
+            </div>
+          )}
         </div>
       </Drawer>
     </div>

@@ -17,9 +17,9 @@ export async function POST(
     const body = await request.json();
     const { action, targetUserId, timeoutMinutes } = body;
 
-    if (!action || !["ban", "timeout", "add_mod", "remove_mod"].includes(action)) {
+    if (!action || !["ban", "timeout", "kick", "add_mod", "remove_mod"].includes(action)) {
       return NextResponse.json(
-        { error: "action must be 'ban', 'timeout', 'add_mod', or 'remove_mod'" },
+        { error: "action must be 'ban', 'timeout', 'kick', 'add_mod', or 'remove_mod'" },
         { status: 400 }
       );
     }
@@ -133,6 +133,28 @@ export async function POST(
           action: "remove_mod",
           targetUserId,
           message: `User ${targetUser.username} has been removed as a moderator`,
+        });
+      }
+
+      case "kick": {
+        // Remove participant (unlike ban, allows rejoin later)
+        await prisma.liveParticipant.deleteMany({
+          where: { liveStreamId: id, userId: targetUserId },
+        });
+
+        // Decrement viewer count
+        if (liveStream.viewerCount > 0) {
+          await prisma.liveStream.update({
+            where: { id },
+            data: { viewerCount: { decrement: 1 } },
+          });
+        }
+
+        return NextResponse.json({
+          success: true,
+          action: "kick",
+          targetUserId,
+          message: `User ${targetUser.username} has been kicked from the room`,
         });
       }
 

@@ -40,6 +40,7 @@ import GiftPanel from "@/components/credits/GiftPanel";
 import { formatViews, formatTimeAgo, cn } from "@/lib/utils";
 import type { DonationTier } from "@/lib/types";
 import { DONATION_TIERS } from "@/lib/donation-tiers";
+import { markOfflineVideoWatchedComplete } from "@/lib/offline/cache-manager";
 
 /* ───────── Types for API responses ───────── */
 interface CreatorData {
@@ -234,16 +235,7 @@ export default function WatchPage() {
   }, [relatedVideos, series]);
 
   /* ── Local state ── */
-  const [autoplayEnabled, setAutoplayEnabled] = useState(() => {
-    if (typeof window !== "undefined") {
-      try {
-        return JSON.parse(localStorage.getItem("rally-autoplay") ?? "true");
-      } catch {
-        return true;
-      }
-    }
-    return true;
-  });
+  const [autoplayEnabled, setAutoplayEnabled] = useState(true);
   const [autoplayCountdown, setAutoplayCountdown] = useState<number | null>(null);
   const [autoplayNextVideo, setAutoplayNextVideo] = useState<VideoData | null>(null);
   const autoplayTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -262,8 +254,18 @@ export default function WatchPage() {
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [commentText, setCommentText] = useState("");
   const [submittingComment, setSubmittingComment] = useState(false);
+  const [clientShareUrl, setClientShareUrl] = useState("");
   const creatorMenuRef = useRef<HTMLDivElement>(null);
   const relatedScrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      setAutoplayEnabled(JSON.parse(localStorage.getItem("rally-autoplay") ?? "true"));
+    } catch {
+      setAutoplayEnabled(true);
+    }
+    setClientShareUrl(window.location.href);
+  }, []);
 
   /* ── Share handler ── */
   const handleShare = useCallback(async () => {
@@ -289,7 +291,7 @@ export default function WatchPage() {
     setShareModalOpen(true);
   }, [video?.title]);
 
-  const shareUrl = typeof window !== "undefined" ? window.location.href : "";
+  const shareUrl = clientShareUrl;
   const shareTitle = video?.title || "Check out this video on Rally Live";
   const encodedUrl = encodeURIComponent(shareUrl);
   const encodedTitle = encodeURIComponent(shareTitle);
@@ -360,8 +362,10 @@ export default function WatchPage() {
     setLiked((prev) => !prev);
     setDisliked(false);
     try {
-      const res = await api.videos.like(videoId, true) as { action: string; likes: number; dislikes: number };
-      setVideo((prev) => prev ? { ...prev, likes: res.likes, dislikes: res.dislikes } : prev);
+      const res = await api.videos.like(videoId, true) as { action: string; likes: number; dislikes: number; queued?: boolean };
+      if (!res.queued) {
+        setVideo((prev) => prev ? { ...prev, likes: res.likes, dislikes: res.dislikes } : prev);
+      }
       if (res.action === "liked") {
         setLiked(true);
         setDisliked(false);
@@ -386,8 +390,10 @@ export default function WatchPage() {
     setDisliked((prev) => !prev);
     setLiked(false);
     try {
-      const res = await api.videos.like(videoId, false) as { action: string; likes: number; dislikes: number };
-      setVideo((prev) => prev ? { ...prev, likes: res.likes, dislikes: res.dislikes } : prev);
+      const res = await api.videos.like(videoId, false) as { action: string; likes: number; dislikes: number; queued?: boolean };
+      if (!res.queued) {
+        setVideo((prev) => prev ? { ...prev, likes: res.likes, dislikes: res.dislikes } : prev);
+      }
       if (res.action === "disliked") {
         setDisliked(true);
         setLiked(false);
@@ -487,25 +493,40 @@ export default function WatchPage() {
     }
   }, [currentUser, creator]);
 
-  /* ── Report handler ── */
+  /* ── Report state & handler ── */
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [reportReason, setReportReason] = useState("");
+
+  const reportReasonOptions = [
+    "Inappropriate content",
+    "Spam or misleading",
+    "Harassment or bullying",
+    "Violence or harmful acts",
+    "Copyright violation",
+    "Other",
+  ];
+
   const handleReport = useCallback(async () => {
     if (!currentUser) {
       useUIStore.getState().addToast("Please log in to report.", "error");
       return;
     }
     if (!creator) return;
+    const reason = reportReason.trim() || "User-reported content";
     try {
       await api.reports.create({
         reportedId: creator.id,
-        reason: "Inappropriate content",
+        reason,
         type: "VIDEO",
         contentId: videoId,
       });
       useUIStore.getState().addToast("Report submitted. Thank you.", "success");
+      setReportModalOpen(false);
+      setReportReason("");
     } catch (err: any) {
       useUIStore.getState().addToast(err.message || "Failed to submit report", "error");
     }
-  }, [currentUser, creator, videoId]);
+  }, [currentUser, creator, videoId, reportReason]);
 
   /* ── Comment submit handler ── */
   const handleCommentSubmit = useCallback(async () => {
@@ -556,6 +577,9 @@ export default function WatchPage() {
   }, []);
 
   const handleVideoEnded = useCallback(() => {
+    if (video?.id) {
+      void markOfflineVideoWatchedComplete(video.id);
+    }
     if (!autoplayEnabled) return;
 
     // Find the next video
@@ -878,7 +902,7 @@ export default function WatchPage() {
               <button
                 onClick={() => {
                   setCreatorMenuOpen(false);
-                  handleReport();
+                  setReportModalOpen(true);
                 }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 transition-colors"
               >
@@ -948,13 +972,12 @@ export default function WatchPage() {
       {video.tags.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-3">
           {video.tags.map((tag) => (
-            <Link
+            <span
               key={tag}
-              href={`/search?q=%23${encodeURIComponent(tag)}`}
-              className="text-[11px] text-primary bg-primary/10 px-2 py-0.5 rounded-full hover:bg-primary/20 transition-colors"
+              className="text-[11px] text-primary bg-primary/10 px-2 py-0.5 rounded-full"
             >
               #{tag}
-            </Link>
+            </span>
           ))}
         </div>
       )}
@@ -1192,7 +1215,7 @@ export default function WatchPage() {
      ═══════════════════════════════════════════ */
 
   return (
-    <div className="min-h-screen pb-20">
+    <div className="h-full min-h-0">
       {/* ══════════ DESKTOP LAYOUT ══════════ */}
       <div className="hidden md:block">
         <div className="max-w-[1400px] mx-auto px-4 sm:px-6">
@@ -1340,7 +1363,7 @@ export default function WatchPage() {
                         )}
                       </div>
                     </div>
-                    <div className="flex-1 overflow-y-auto p-4 max-h-[calc(100vh-380px)]" style={{ scrollbarWidth: "thin" }}>
+                    <div className="flex-1 overflow-visible p-4">
                       {!commentsEnabled ? (
                         <div className="flex flex-col items-center justify-center py-12 text-center">
                           <MessageCircleOff className="w-10 h-10 text-text-muted mb-3" />
@@ -1616,6 +1639,56 @@ export default function WatchPage() {
                 Copy
               </Button>
             </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ── Report Modal ── */}
+      <Modal
+        isOpen={reportModalOpen}
+        onClose={() => { setReportModalOpen(false); setReportReason(""); }}
+        title="Report Video"
+        size="sm"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-text-secondary">
+            Why are you reporting this video?
+          </p>
+          <div className="space-y-2">
+            {reportReasonOptions.map((option) => (
+              <button
+                key={option}
+                onClick={() => setReportReason(option)}
+                className={cn(
+                  "w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors border",
+                  reportReason === option
+                    ? "border-primary bg-primary/10 text-primary font-medium"
+                    : "border-border bg-bg-surface2 text-text-secondary hover:bg-bg-surface3"
+                )}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-3 pt-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => { setReportModalOpen(false); setReportReason(""); }}
+              className="flex-1"
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleReport}
+              disabled={!reportReason}
+              className="flex-1"
+              icon={<Flag className="w-4 h-4" />}
+            >
+              Submit Report
+            </Button>
           </div>
         </div>
       </Modal>

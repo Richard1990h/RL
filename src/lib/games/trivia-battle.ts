@@ -21,8 +21,41 @@ function triviaTick(state: GameState, deltaMs: number): GameState {
   if (state.phase !== "active") return state;
 
   const questionActive = state.data.questionActive as boolean;
-  if (!questionActive) return state;
 
+  // Answer reveal phase (runs when questionActive is false)
+  if (!questionActive) {
+    const answerTimer = state.data.answerRevealTimer as number;
+    if (answerTimer > 0) {
+      state.data.answerRevealTimer = answerTimer - deltaMs / 1000;
+      if (answerTimer - deltaMs / 1000 <= 0) {
+        state.data.showingAnswer = false;
+        state.data.answerRevealTimer = 0;
+
+        // Next question or end game
+        const questionIndex = (state.data.questionIndex as number) || 0;
+        const questions = (state.data.questions as TriviaQuestion[]) || [];
+
+        if (questionIndex + 1 >= questions.length) {
+          // Game over
+          state.phase = "finished";
+          const sorted = Object.values(state.players)
+            .filter((p) => !p.isEliminated)
+            .sort((a, b) => b.score - a.score);
+          state.winner = sorted[0]?.userId || null;
+        } else {
+          // Next question
+          state.data.questionIndex = questionIndex + 1;
+          state.data.questionActive = true;
+          state.data.answeredThisRound = {};
+          state.timeRemaining = questions[questionIndex + 1].timeLimit;
+          state.round = questionIndex + 2;
+        }
+      }
+    }
+    return state;
+  }
+
+  // Active question countdown
   state.timeRemaining -= deltaMs / 1000;
 
   if (state.timeRemaining <= 0) {
@@ -30,39 +63,6 @@ function triviaTick(state: GameState, deltaMs: number): GameState {
     state.data.questionActive = false;
     state.data.showingAnswer = true;
     state.data.answerRevealTimer = 3; // Show answer for 3 seconds
-
-    // Move to next question after reveal
-    return state;
-  }
-
-  // Check if answer reveal timer is active
-  const answerTimer = state.data.answerRevealTimer as number;
-  if (answerTimer > 0) {
-    state.data.answerRevealTimer = answerTimer - deltaMs / 1000;
-    if (answerTimer - deltaMs / 1000 <= 0) {
-      state.data.showingAnswer = false;
-      state.data.answerRevealTimer = 0;
-
-      // Next question or end game
-      const questionIndex = (state.data.questionIndex as number) || 0;
-      const questions = (state.data.questions as TriviaQuestion[]) || [];
-
-      if (questionIndex + 1 >= questions.length) {
-        // Game over
-        state.phase = "finished";
-        const sorted = Object.values(state.players)
-          .filter((p) => !p.isEliminated)
-          .sort((a, b) => b.score - a.score);
-        state.winner = sorted[0]?.userId || null;
-      } else {
-        // Next question
-        state.data.questionIndex = questionIndex + 1;
-        state.data.questionActive = true;
-        state.data.answeredThisRound = {};
-        state.timeRemaining = questions[questionIndex + 1].timeLimit;
-        state.round = questionIndex + 2;
-      }
-    }
   }
 
   return state;

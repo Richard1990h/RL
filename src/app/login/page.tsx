@@ -10,7 +10,6 @@ import {
   Lock,
   Loader2,
   ArrowRight,
-  Chrome,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";

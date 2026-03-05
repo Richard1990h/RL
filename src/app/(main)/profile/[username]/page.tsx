@@ -100,7 +100,7 @@ export default function ProfilePage() {
     setShowFollowersModal(true);
     setModalLoading(true);
     try {
-      const res = await fetch(`/api/users/${user.id}/followers?limit=50`);
+      const res = await fetch(`/api/users/${user.id}/followers?limit=50`, { credentials: "include" });
       const data = await res.json();
       setModalUsers(data.users || []);
     } catch {
@@ -115,7 +115,7 @@ export default function ProfilePage() {
     setShowFollowingModal(true);
     setModalLoading(true);
     try {
-      const res = await fetch(`/api/users/${user.id}/following?limit=50`);
+      const res = await fetch(`/api/users/${user.id}/following?limit=50`, { credentials: "include" });
       const data = await res.json();
       setModalUsers(data.users || []);
     } catch {

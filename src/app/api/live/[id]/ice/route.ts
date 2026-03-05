@@ -13,11 +13,14 @@ export async function POST(
   }
 
   const body = await request.json();
-  const { from, to, candidate } = body;
+  const { to, candidate } = body;
 
-  if (!from || !to || !candidate) {
-    return NextResponse.json({ error: "Missing from, to, or candidate" }, { status: 400 });
+  if (!to || !candidate) {
+    return NextResponse.json({ error: "Missing to or candidate" }, { status: 400 });
   }
+
+  // Use authenticated user's ID instead of trusting client-supplied `from`
+  const from = user.id;
 
   // Forward the ICE candidate via the signaling channel
   const response = await fetch(

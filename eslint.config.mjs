@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated/vendor trees outside app source quality gate:
+    "fivem/**",
+    "src/generated/**",
+    "src/src.zip",
   ]),
 ]);
 
