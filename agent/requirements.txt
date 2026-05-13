@@ -1,0 +1,2 @@
+anthropic>=0.102.0
+playwright>=1.59.0

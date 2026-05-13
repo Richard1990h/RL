@@ -1,0 +1,11 @@
+{
+  "seller": {
+    "username": "your_fiverr_username",
+    "skills": ["Web Development", "React", "Node.js"],
+    "services": ["Build responsive websites", "Fix bugs", "API integrations"],
+    "min_price_usd": 25,
+    "max_price_usd": 500,
+    "delivery_days": 3
+  },
+  "offer_template": "Hi! I noticed you need [specific need from their request]. I specialise in [relevant skill] and have delivered similar projects in [timeframe]. I can [clear deliverable] within [X] days for $[price]. Feel free to message me with any questions!"
+}
