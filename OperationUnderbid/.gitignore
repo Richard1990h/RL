@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env.local
+.env
+db/*.db
+db/*.db-wal
+db/*.db-shm
+logs/
+screenshots/
+deliverables/
+profiles/
+queues/
+*.pem
+.DS_Store
