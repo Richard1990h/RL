@@ -1,0 +1,37 @@
+{
+  "name": "operation-underbid",
+  "version": "2.0.0",
+  "description": "Autonomous Fiverr/Upwork service agency — local-AI edition",
+  "main": "dist/core/orchestrator.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/core/orchestrator.js",
+    "dev": "tsx src/core/orchestrator.ts",
+    "smoke": "tsx src/smoke-tests.ts",
+    "setup": "tsx src/setup.ts"
+  },
+  "dependencies": {
+    "bullmq": "^5.15.0",
+    "better-sqlite3": "^11.7.0",
+    "discord.js": "^14.16.3",
+    "playwright": "^1.49.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.7",
+    "axios": "^1.7.9",
+    "form-data": "^4.0.1",
+    "uuid": "^11.0.3",
+    "fast-csv": "^5.0.1",
+    "sharp": "^0.33.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

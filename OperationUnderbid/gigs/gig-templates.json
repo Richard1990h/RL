@@ -1,0 +1,82 @@
+{
+  "gigs": [
+    {
+      "id": "blog-writing",
+      "type": "blog",
+      "title": "I will write an SEO-optimised blog post or article for your website",
+      "description": "Need fresh, engaging content that ranks? I write well-researched, SEO-friendly blog posts and articles tailored to your audience.\n\nAI-assisted writing clearly disclosed. Every post is proofread, structured with H2/H3 headings, and written to hold readers' attention.\n\nWhat you get:\n✅ Chosen word count delivered on time\n✅ Keyword-focused without keyword stuffing\n✅ Engaging introduction and clear call-to-action\n✅ One free revision",
+      "packages": {
+        "basic":    { "name": "Starter", "description": "500-word blog post", "price": 10, "delivery_days": 2, "revisions": 1 },
+        "standard": { "name": "Standard", "description": "1000-word blog post with meta description", "price": 20, "delivery_days": 2, "revisions": 2 },
+        "premium":  { "name": "Pro", "description": "2000-word long-form article with SEO brief", "price": 40, "delivery_days": 3, "revisions": 3 }
+      },
+      "tags": ["blog post", "article writing", "SEO content", "copywriting", "content writing"],
+      "category": "Writing & Translation"
+    },
+    {
+      "id": "logo-design",
+      "type": "logo",
+      "title": "I will design a modern, minimalist logo for your brand",
+      "description": "First impressions matter. I create clean, memorable logos that look great everywhere — from business cards to billboard.\n\nGenerated using advanced AI image tools and refined for professional output. Clearly disclosed as AI-assisted design.\n\nDeliverables:\n✅ PNG with transparent background\n✅ High-resolution file\n✅ Colour and black-and-white versions\n✅ One free revision",
+      "packages": {
+        "basic":    { "name": "Basic Logo", "description": "1 concept, PNG", "price": 15, "delivery_days": 2, "revisions": 1 },
+        "standard": { "name": "Brand Logo", "description": "2 concepts, PNG + transparent", "price": 30, "delivery_days": 2, "revisions": 2 },
+        "premium":  { "name": "Full Brand Kit", "description": "3 concepts + colour palette + usage guide", "price": 60, "delivery_days": 3, "revisions": 3 }
+      },
+      "tags": ["logo design", "brand logo", "minimalist logo", "AI logo", "business logo"],
+      "category": "Graphics & Design"
+    },
+    {
+      "id": "website-design",
+      "type": "website",
+      "title": "I will build a responsive one-page website with HTML and Tailwind CSS",
+      "description": "Need a clean, fast landing page without the agency price tag? I build responsive one-page websites ready to host anywhere.\n\nBuilt with semantic HTML5 and Tailwind CSS. Mobile-first. No frameworks needed — just upload and go.\n\nIncludes:\n✅ Fully responsive design\n✅ Clean, commented code\n✅ Contact section\n✅ One free revision",
+      "packages": {
+        "basic":    { "name": "Landing Page", "description": "One section, clean layout", "price": 25, "delivery_days": 3, "revisions": 1 },
+        "standard": { "name": "Full Landing Page", "description": "Hero, about, services, contact sections", "price": 50, "delivery_days": 3, "revisions": 2 },
+        "premium":  { "name": "Multi-section Site", "description": "7+ sections, animations, CTA optimised", "price": 90, "delivery_days": 5, "revisions": 3 }
+      },
+      "tags": ["website design", "HTML CSS", "landing page", "responsive website", "web development"],
+      "category": "Programming & Tech"
+    },
+    {
+      "id": "seo-copy",
+      "type": "seo",
+      "title": "I will write SEO-optimised website copy, meta tags, and keyword strategy",
+      "description": "Rank higher and convert better. I deliver a complete SEO copy package: meta title, meta description, target keywords, and a fully optimised page article.\n\nEach piece is written to satisfy both search engines and real readers. No keyword stuffing.\n\nDeliverables:\n✅ Meta title (≤60 chars)\n✅ Meta description (≤160 chars)\n✅ 5 target keywords with rationale\n✅ 800-word SEO article",
+      "packages": {
+        "basic":    { "name": "SEO Starter", "description": "Meta tags + 5 keywords", "price": 15, "delivery_days": 2, "revisions": 1 },
+        "standard": { "name": "SEO Package", "description": "Meta tags + keywords + 800-word article", "price": 30, "delivery_days": 2, "revisions": 2 },
+        "premium":  { "name": "Full SEO Suite", "description": "Everything + competitor gap analysis note", "price": 55, "delivery_days": 3, "revisions": 3 }
+      },
+      "tags": ["SEO writing", "meta tags", "keyword research", "SEO copy", "on-page SEO"],
+      "category": "Digital Marketing"
+    },
+    {
+      "id": "video-captions",
+      "type": "caption",
+      "title": "I will create accurate SRT subtitle captions for your video",
+      "description": "Reach a wider audience and improve accessibility with accurate subtitles. I create SRT caption files compatible with YouTube, Premiere Pro, DaVinci Resolve, and more.\n\nDeliverables:\n✅ SRT file (ready to upload)\n✅ Accurate timestamps\n✅ Clean punctuation and formatting\n✅ One free revision",
+      "packages": {
+        "basic":    { "name": "Short Video", "description": "Up to 5 minutes", "price": 15, "delivery_days": 2, "revisions": 1 },
+        "standard": { "name": "Medium Video", "description": "5–15 minutes", "price": 25, "delivery_days": 2, "revisions": 2 },
+        "premium":  { "name": "Long Video", "description": "15–30 minutes", "price": 45, "delivery_days": 3, "revisions": 3 }
+      },
+      "tags": ["subtitles", "captions", "SRT file", "video captions", "accessibility"],
+      "category": "Video & Animation"
+    },
+    {
+      "id": "social-media-copy",
+      "type": "social",
+      "title": "I will write engaging social media captions and posts for 5 platforms",
+      "description": "Stop staring at a blank screen. I write platform-native social media copy for Twitter/X, Instagram, LinkedIn, Facebook, and TikTok — all from one brief.\n\nEach post is written in the platform's native voice and tone.\n\nDeliverables:\n✅ Twitter/X post (≤280 chars)\n✅ Instagram caption + hashtag block\n✅ LinkedIn professional post\n✅ Facebook conversational post\n✅ TikTok caption\n✅ One free revision",
+      "packages": {
+        "basic":    { "name": "One Topic", "description": "1 set of posts for all 5 platforms", "price": 12, "delivery_days": 1, "revisions": 1 },
+        "standard": { "name": "Content Pack", "description": "5 topics × 5 platforms = 25 posts", "price": 45, "delivery_days": 3, "revisions": 2 },
+        "premium":  { "name": "Monthly Pack", "description": "20 topics × 5 platforms = 100 posts", "price": 150, "delivery_days": 7, "revisions": 3 }
+      },
+      "tags": ["social media", "Instagram captions", "LinkedIn posts", "Twitter copy", "content creation"],
+      "category": "Digital Marketing"
+    }
+  ]
+}
