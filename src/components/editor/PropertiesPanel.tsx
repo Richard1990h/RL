@@ -209,7 +209,7 @@ export default function PropertiesPanel() {
         <CropSection crop={editState.crop} onUpdate={setCrop} />
       )}
       {activeTool === "effects" && (
-        <EffectsSection onApplyPreset={applyEffectPreset} />
+        <EffectsSection onApplyPreset={applyEffectPreset} duration={editState.duration} />
       )}
       {activeTool === "stickers" && (
         <StickersSection
@@ -1655,8 +1655,10 @@ function CropSection({
 
 function EffectsSection({
   onApplyPreset,
+  duration,
 }: {
   onApplyPreset: (filters: Omit<FilterEffect, "id">[]) => void;
+  duration: number;
 }) {
   return (
     <div className="space-y-3">
@@ -1673,7 +1675,7 @@ function EffectsSection({
                 preset.filters.map((f) => ({
                   ...f,
                   startTime: 0,
-                  endTime: editState?.duration ?? 0,
+                  endTime: duration,
                 }))
               )
             }

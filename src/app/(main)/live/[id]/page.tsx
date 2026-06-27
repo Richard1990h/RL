@@ -353,12 +353,18 @@ function RegularLiveView({
   const getDonationTier = useCallback((amount: number) => {
     const sorted = [...DONATION_TIERS].sort((a, b) => b.valueCents - a.valueCents);
     const tier = sorted.find((t) => amount >= t.valueCents) ?? DONATION_TIERS[0];
+    const animationType = tier.animationType as "none" | "sparkle" | "explosion" | "takeover";
+    // Map the visual animation intensity to the donation-alert category.
+    const category: "basic" | "premium" | "legendary" =
+      animationType === "takeover" ? "legendary"
+      : animationType === "none" ? "basic"
+      : "premium";
     return {
       name: tier.name,
       iconKey: tier.iconKey,
       rarityColor: tier.rarityColor,
-      animationType: tier.animationType as "none" | "sparkle" | "explosion" | "takeover",
-      category: tier.category,
+      animationType,
+      category,
     };
   }, []);
 

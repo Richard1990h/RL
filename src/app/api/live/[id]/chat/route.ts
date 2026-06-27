@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
-import { insertLedgerEntries } from "@/lib/credit-ledger";
+import { insertLedgerEntries, type LedgerEntry } from "@/lib/credit-ledger";
 
 // GET: Get recent chat messages
 export async function GET(
@@ -142,7 +142,7 @@ export async function POST(
         });
 
         // Double-entry ledger
-        const ledgerEntries = [
+        const ledgerEntries: LedgerEntry[] = [
           {
             userId: user.id,
             deltaCredits: -creditAmount,
@@ -166,7 +166,7 @@ export async function POST(
           ledgerEntries.push({
             userId: treasuryUserId,
             deltaCredits: platformShare,
-            type: "PLATFORM_FEE" as const,
+            type: "PLATFORM_FEE_SETTLED" as const,
             referenceId: senderTx.id,
             description: `Platform share from live donation`,
           });
