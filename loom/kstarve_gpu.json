@@ -1,0 +1,23 @@
+{
+  "_note": "CPU roofline analog of kstarve; no GPU on this box",
+  "peak_fp64_gflops": 82.17,
+  "triad_gbps": 14.13,
+  "ridge_ai_flop_per_byte": 5.82,
+  "sweep": [
+    {"W": 1, "ai": 0.25, "gflops": 3.32},
+    {"W": 2, "ai": 0.50, "gflops": 7.46},
+    {"W": 4, "ai": 1.00, "gflops": 12.79},
+    {"W": 8, "ai": 2.00, "gflops": 25.75},
+    {"W": 16, "ai": 4.00, "gflops": 37.51},
+    {"W": 24, "ai": 6.00, "gflops": 40.01},
+    {"W": 32, "ai": 8.00, "gflops": 39.20},
+    {"W": 48, "ai": 12.00, "gflops": 39.55},
+    {"W": 64, "ai": 16.00, "gflops": 34.83},
+    {"W": 128, "ai": 32.00, "gflops": 24.78}
+  ],
+  "plateau_gflops": 40.01,
+  "knee_W": 16,
+  "R1_membw_hit": true,
+  "R2_knee_hit": true,
+  "R3_ceiling_hit": false
+}

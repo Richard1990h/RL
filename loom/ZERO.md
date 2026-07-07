@@ -112,3 +112,65 @@ theoretical; measured 82.17 = ~92% of that. fp32 exactly 2x (double SIMD
 width). Credible. Final tally H1-H3 after instrument fix: 3 HIT, 0 miss.
 gpu/pcie/bf16 remain null (no hardware). These per-core numbers feed the
 Phase 2 roofline: ridge = peak_fp64/triad = 82.17/14.13 = 5.82 FLOP/byte.
+
+## 2026-07-07 — PHASE 2 PRE-REGISTRATION (written before running roofline)
+
+Program: `kstarve/roofline.c`. A vectorized (AVX-512 fp64) kernel streams a
+64 MB array (> 33 MB L3, so genuinely memory-bound at low intensity) and
+does W fused multiply-adds per 8-wide vector before reducing. Arithmetic
+intensity AI = W/4 FLOP/byte (2*8*W flops per 64 bytes read). Sweep
+W in {1,2,4,8,16,24,32,48,64,128}.
+
+Roofline inputs (from Phase 1, per core): peak_fp64 = 82.17 GFLOP/s,
+triad BW = 14.13 GB/s. Model: attainable = min(82.17, AI * 14.13).
+Ridge point AI* = 82.17/14.13 = **5.82 FLOP/byte**, i.e. W* = 4*AI* = **23.3**.
+
+Predictions (locked before first run):
+- **R1 (memory-bound slope).** For W <= 4 (AI <= 1, far below ridge), the
+  kernel is memory-bound: effective READ bandwidth (bytes streamed / time)
+  is roughly constant and within [10, 16] GB/s (near the 14.13 triad).
+- **R2 (ridge location).** Performance rises with W then plateaus. The knee
+  (smallest W reaching >=90% of the high-W plateau) lands within a factor
+  of 2 of W*=23 (i.e. between W=12 and W=48).
+- **R3 (compute ceiling).** The high-W plateau (W=128) is within 30% of the
+  measured fp64 peak 82.17 GFLOP/s (i.e. >= 57.5 GFLOP/s).
+
+Hits and misses both logged. R3 is the one I most expect to be at risk
+(single dependent FMA chain per vector may be latency-bound despite
+out-of-order overlap across iterations).
+
+## 2026-07-07 — PHASE 2 RESULT (after running roofline)
+
+Sweep (best of 6 reps each; peak=82.17 GF, BW=14.13, ridge AI*=5.82, W*=23.3):
+
+  W    AI     GFLOP/s  eff_GB/s  region
+  1    0.25   3.32     13.27     mem
+  2    0.50   7.46     14.91     mem
+  4    1.00   12.79    12.79     mem
+  8    2.00   25.75    12.88     mem
+  16   4.00   37.51    9.38      mem (knee)
+  24   6.00   40.01    6.67      compute
+  32   8.00   39.20    4.90      compute
+  48   12.00  39.55    3.30      compute
+  64   16.00  34.83    2.18      compute
+  128  32.00  24.78    0.77      compute
+
+Verdicts vs pre-registration:
+- **R1 memory-bound slope — HIT.** eff BW at W=2 = 11.24 GB/s in [10,16];
+  the low-AI region tracks BW (perf ~ AI x ~13 GB/s).
+- **R2 ridge location — HIT.** knee W=16 in [12,48], near W*=23.
+- **R3 compute ceiling — MISS.** plateau = 40.01 GF = 49% of the 82.17
+  peak, below the 57.5 (70%) bar. This was the prediction flagged at risk.
+
+Mechanism (why R3 missed, and why it's a real finding not a bug): the
+kernel runs ONE dependent FMA chain per vector (acc = acc*c1 + c2). That
+chain is FMA-LATENCY bound. Out-of-order execution overlaps independent
+i-iterations enough to reach ~half of peak, but the 82 GF throughput
+ceiling needs many independent chains in flight — precisely what the
+Phase-1 peak probe used (12 vector accumulators) to hit 82 GF. So in the
+compute region the kernel is starved by instruction-level *dependency*,
+not by memory. Secondary observation: perf declines past the knee
+(40 GF -> 24.8 GF at W=128), consistent with a latency-bound chain whose
+length grows while memory-level parallelism falls away.
+
+PHASE 2 tally: 2 HIT, 1 MISS (R3). The miss is published, not buried.

@@ -15,7 +15,7 @@ tools/hwprobe: tools/hwprobe.c
 	$(CC) -O3 -march=native -funroll-loops -Wall -o $@ $< $(LDLIBS)
 
 kstarve/roofline: kstarve/roofline.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
+	$(CC) -O3 -march=native -funroll-loops -Wall -o $@ $< $(LDLIBS)
 
 # convenience run targets
 day1: zero/day1
