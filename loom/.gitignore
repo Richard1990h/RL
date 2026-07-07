@@ -1,0 +1,5 @@
+# compiled binaries (source is committed; binaries are reproducible)
+zero/day1
+tools/hwprobe
+kstarve/roofline
+*.o
