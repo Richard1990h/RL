@@ -174,3 +174,31 @@ not by memory. Secondary observation: perf declines past the knee
 length grows while memory-level parallelism falls away.
 
 PHASE 2 tally: 2 HIT, 1 MISS (R3). The miss is published, not buried.
+
+## 2026-07-07 — PROJECT COMPLETE — every measured number
+
+All numbers below came from a program that actually ran on this box.
+
+PHASE 0 — autograd from zero (zero/day1.c), all 3 predictions HIT:
+  gradcheck max rel err = 3.570e-08  (bar < 1e-6)
+  linreg GD  a=0.800000 b=1.400000 MSE=0.720000
+  linreg OLS a=0.800000 b=1.400000 MSE=0.720000  (matches to 6 dp)
+  loss monotonic over 20000 steps = YES
+
+PHASE 1 — hardware truth probe (hw.json), all 3 predictions HIT (after fix):
+  RAM triad bandwidth      = 14.13 GB/s   (single thread)
+  peak fp64 FMA            = 82.17 GFLOP/s (single core)
+  peak fp32 FMA            = 165.53 GFLOP/s
+  fp32/fp64 ratio          = 2.015
+  naive fp64 matmul        = 7.30 GFLOP/s
+  gpu / pcie / bf16        = null (no such hardware)
+
+PHASE 2 — roofline / starvation (kstarve_gpu.json), 2 HIT + 1 MISS:
+  ridge point AI*          = 5.82 FLOP/byte  (W* = 23.3)
+  R1 mem-bound BW (W=2)    = 11.24 GB/s   HIT
+  R2 knee                  = W=16         HIT
+  R3 compute plateau       = 40.01 GF (49% of peak)  MISS (latency-bound chain)
+
+Scoreboard: 8 predictions pre-registered, 7 HIT, 1 MISS. The miss (R3) and
+the Phase-1 instrument bug are both logged in full above. Nothing tuned to
+manufacture a hit.
