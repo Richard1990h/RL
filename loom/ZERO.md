@@ -62,3 +62,53 @@ Build: `cc -O2 -Wall -o day1 day1.c -lm` (clean, no warnings). Ran ./day1.
   steps (lr=0.02).
 
 PHASE 0 verdict: **PASS**. 0 misses. Autograd engine is correct.
+
+## 2026-07-07 — PHASE 1 PRE-REGISTRATION (written before running hwprobe)
+
+Program: `tools/hwprobe.c` — measures this box. No spec-sheet claims.
+Compiled with -O3 -march=native so AVX-512/FMA are actually used. All
+measurements are SINGLE-THREADED unless stated (roofline peaks are
+per-core; aggregate is noted separately).
+
+Metrics: STREAM-triad RAM bandwidth (GB/s), fp64 & fp32 peak FMA GFLOP/s
+(independent-accumulator microkernel), and naive fp64 matmul GFLOP/s.
+
+Predictions (locked before first run):
+- **H1.** Single-thread STREAM-triad bandwidth is in [5, 40] GB/s.
+- **H2.** fp32 peak / fp64 peak ratio is in [1.7, 2.3] (2x SIMD width).
+- **H3.** fp64 peak FMA GFLOP/s is at least 4x the naive fp64 matmul
+  GFLOP/s (naive matmul is bound by memory/loop order, not the FPU).
+
+No pass/fail gate on Phase 1 — it is a truth probe. H1–H3 are honesty
+checks; hits and misses both get logged.
+
+## 2026-07-07 — PHASE 1 RESULT #1 (instrument bug found, logged for honesty)
+
+First run of hwprobe:
+- ram_triad_gbps = 14.12  -> H1 [5,40] HIT.
+- peak_fp64 = 1.65, peak_fp32 = 1.65, ratio = 1.000  -> H2 [1.7,2.3] MISS.
+- peak_over_naive_fp64 = 0.24 (peak 1.65 < naive matmul 6.76) -> H3 MISS.
+
+Diagnosis: H2/H3 "misses" are an INSTRUMENT BUG, not hardware truth. A
+peak-FLOPs kernel that reports below a naive matmul cannot be measuring the
+FPU ceiling. Root cause: 32 scalar accumulators spilled to the stack, so
+the loop was L1-load-latency bound and never vectorized (hence fp32==fp64
+exactly). Fix: rewrite the peak kernel with AVX-512 GCC vector accumulators
+(register-resident, enough ILP to saturate FMA throughput) and re-measure.
+The 14.12 GB/s triad number stands (that kernel was fine).
+
+## 2026-07-07 — PHASE 1 RESULT #2 (fixed instrument, final)
+
+hw.json (single thread, -O3 -march=native):
+- ram_triad_gbps            = 14.13   -> H1 [5,40]      HIT
+- peak_fp64_gflops          = 82.17
+- peak_fp32_gflops          = 165.53
+- fp32_over_fp64            = 2.015   -> H2 [1.7,2.3]   HIT
+- naive_matmul_fp64_gflops  = 7.30
+- peak_over_naive_fp64      = 11.26   -> H3 (>=4)       HIT
+
+Sanity: 2.8 GHz x 8 fp64 lanes x 2 flops/FMA x 2 FMA units = 89.6 GFLOP/s
+theoretical; measured 82.17 = ~92% of that. fp32 exactly 2x (double SIMD
+width). Credible. Final tally H1-H3 after instrument fix: 3 HIT, 0 miss.
+gpu/pcie/bf16 remain null (no hardware). These per-core numbers feed the
+Phase 2 roofline: ridge = peak_fp64/triad = 82.17/14.13 = 5.82 FLOP/byte.

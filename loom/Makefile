@@ -10,8 +10,9 @@ all: zero/day1 tools/hwprobe kstarve/roofline
 zero/day1: zero/day1.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 
+# peak-flops probe needs native SIMD/FMA to report achievable peak honestly
 tools/hwprobe: tools/hwprobe.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
+	$(CC) -O3 -march=native -funroll-loops -Wall -o $@ $< $(LDLIBS)
 
 kstarve/roofline: kstarve/roofline.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)

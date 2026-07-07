@@ -1,0 +1,14 @@
+{
+  "machine": "Intel Xeon @ 2.80GHz, 4 vCPU, AVX-512",
+  "gpu": null,
+  "pcie_gbps": null,
+  "bf16_matmul_tflops": null,
+  "_note": "gpu/pcie/bf16 are null: no such hardware on this box",
+  "threads": 1,
+  "ram_triad_gbps": 14.13,
+  "peak_fp64_gflops": 82.17,
+  "peak_fp32_gflops": 165.53,
+  "fp32_over_fp64": 2.015,
+  "naive_matmul_fp64_gflops": 7.30,
+  "peak_over_naive_fp64": 11.26
+}
